@@ -186,14 +186,15 @@ func (s *adapterSession) SendInput(ctx context.Context, data []byte) error {
 	}()
 
 	cfg := runner.Config{
-		Provider:  s.runtime.cfg.Adapter,
-		Profile:   s.opts.Profile,
-		Workspace: s.opts.Workdir,
-		Args:      args,
-		Env:       s.opts.Env,
-		Stderr:    s.opts.Stderr,
-		WaitDelay: s.runtime.cfg.WaitDelay,
-		OnEvent:   s.handleRunnerEvent,
+		Provider:   s.runtime.cfg.Adapter,
+		Profile:    s.opts.Profile,
+		Workspace:  s.opts.Workdir,
+		Args:       args,
+		Env:        s.opts.Env,
+		Stderr:     s.opts.Stderr,
+		ExtraFiles: s.opts.ExtraFiles,
+		WaitDelay:  s.runtime.cfg.WaitDelay,
+		OnEvent:    s.handleRunnerEvent,
 	}
 	err := runner.Run(runCtx, cfg)
 	if err != nil {

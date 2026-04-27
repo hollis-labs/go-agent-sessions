@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/hollis-labs/go-providers/provider"
+	"github.com/hollis-labs/go-sandbox/sandbox"
 )
 
 // echoAdapter is a minimal provider.CLIAdapter for end-to-end testing.
@@ -97,6 +99,24 @@ func writeTestScriptWithStderr(t *testing.T, dir, stderrLine string, stdoutLines
 	return path
 }
 
+func writeFD3Script(t *testing.T, dir string) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("test script needs sh; not running on Windows")
+	}
+	path := filepath.Join(dir, "fake-cli-fd3.sh")
+	body := `#!/bin/sh
+IFS= read -r payload <&3
+printf 'delta:%s\n' "$payload"
+printf 'done\n'
+exit 0
+`
+	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+	return path
+}
+
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
@@ -159,6 +179,121 @@ func TestStartOptions_Stderr_NilLeavesStderrUnset(t *testing.T) {
 
 	if err := sess.SendInput(context.Background(), []byte("ignored")); err != nil {
 		t.Fatalf("SendInput: %v", err)
+	}
+}
+
+func TestStartOptions_ExtraFiles_PassesThroughToRunner(t *testing.T) {
+	dir := t.TempDir()
+	script := writeFD3Script(t, dir)
+
+	rt, err := NewFromAdapter(AdapterRuntimeConfig{
+		ID:      "extra-files",
+		Kind:    "cli",
+		Adapter: &echoAdapter{script: script},
+	})
+	if err != nil {
+		t.Fatalf("NewFromAdapter: %v", err)
+	}
+
+	readEnd, writeEnd, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	defer readEnd.Close()
+
+	if _, err := writeEnd.WriteString("fd3-through-runner\n"); err != nil {
+		t.Fatalf("write pipe: %v", err)
+	}
+	if err := writeEnd.Close(); err != nil {
+		t.Fatalf("close write pipe: %v", err)
+	}
+
+	var fanout bytes.Buffer
+	sess, err := rt.Start(context.Background(), StartOptions{
+		Workdir:    dir,
+		Fanout:     &fanout,
+		ExtraFiles: []*os.File{readEnd},
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = sess.Stop(context.Background()) }()
+
+	if err := sess.SendInput(context.Background(), []byte("ignored")); err != nil {
+		t.Fatalf("SendInput: %v", err)
+	}
+
+	if got := fanout.String(); got != "fd3-through-runner\n[turn_done]\n" {
+		t.Fatalf("fanout = %q, want %q", got, "fd3-through-runner\n[turn_done]\n")
+	}
+}
+
+func TestStartOptions_ExtraFiles_WithSandboxProfile_PreservesFDs(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skipf("sandbox.Apply unsupported on %s", runtime.GOOS)
+	}
+	if runtime.GOOS == "linux" {
+		if _, err := exec.LookPath("bwrap"); err != nil {
+			t.Skip("bwrap not installed")
+		}
+	}
+	if runtime.GOOS == "darwin" {
+		if _, err := exec.LookPath("sandbox-exec"); err != nil {
+			t.Skip("sandbox-exec not installed")
+		}
+	}
+
+	dir := t.TempDir()
+	script := writeFD3Script(t, dir)
+
+	rt, err := NewFromAdapter(AdapterRuntimeConfig{
+		ID:      "extra-files-sandbox",
+		Kind:    "cli",
+		Adapter: &echoAdapter{script: script},
+	})
+	if err != nil {
+		t.Fatalf("NewFromAdapter: %v", err)
+	}
+
+	readEnd, writeEnd, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	defer readEnd.Close()
+
+	if _, err := writeEnd.WriteString("fd3-through-sandbox\n"); err != nil {
+		t.Fatalf("write pipe: %v", err)
+	}
+	if err := writeEnd.Close(); err != nil {
+		t.Fatalf("close write pipe: %v", err)
+	}
+
+	var fanout bytes.Buffer
+	sess, err := rt.Start(context.Background(), StartOptions{
+		Workdir:    dir,
+		Fanout:     &fanout,
+		ExtraFiles: []*os.File{readEnd},
+		Profile: sandbox.Profile{
+			ID:          "extra-files-sandbox",
+			Description: "test extra file inheritance through sandbox wrapper",
+			FS:          sandbox.FSSpec{Read: []string{"workspace"}, Write: []string{"workspace"}},
+			Net:         false,
+			Subprocess:  true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = sess.Stop(context.Background()) }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := sess.SendInput(ctx, []byte("ignored")); err != nil {
+		t.Fatalf("SendInput: %v", err)
+	}
+
+	if got := fanout.String(); got != "fd3-through-sandbox\n[turn_done]\n" {
+		t.Fatalf("fanout = %q, want %q", got, "fd3-through-sandbox\n[turn_done]\n")
 	}
 }
 

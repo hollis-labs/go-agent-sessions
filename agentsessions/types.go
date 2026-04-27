@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
 
 	"github.com/hollis-labs/go-providers/provider"
 	"github.com/hollis-labs/go-sandbox/sandbox"
@@ -148,6 +149,14 @@ type StartOptions struct {
 	// os/exec routes to os.DevNull). This field is a no-op for the
 	// provider-driven runtime (HTTP transport, no subprocess).
 	Stderr io.Writer
+
+	// ExtraFiles, when non-nil, is forwarded to runner.Config.ExtraFiles
+	// in the adapter-driven runtime so the spawned subprocess inherits the
+	// listed open files at FD 3+. Used by consumers that plumb
+	// out-of-band channels into the spawned binary. Nil leaves the
+	// default empty. This field is a no-op for the provider-driven
+	// runtime (HTTP transport, no subprocess).
+	ExtraFiles []*os.File
 
 	// Profile is the resolved go-sandbox profile. The zero-value
 	// sandbox.Profile (empty ID) disables sandbox wrapping. A non-zero
