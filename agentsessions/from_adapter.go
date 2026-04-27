@@ -1,0 +1,294 @@
+package agentsessions
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/hollis-labs/go-providers/provider"
+	"github.com/hollis-labs/go-runner/runner"
+)
+
+// AdapterRuntimeConfig configures a Runtime backed by a
+// go-providers.CLIAdapter. Each SendInput drives a fresh runner.Run that
+// invokes the underlying CLI binary; a turn ends when the runner emits
+// EventProcessExited / EventProcessTimeout.
+type AdapterRuntimeConfig struct {
+	// ID is the runtime's stable identifier. Required.
+	ID string
+
+	// Kind is the free-form classification token (e.g. "cli"). Required.
+	Kind string
+
+	// Adapter is the go-providers CLIAdapter to drive. Required.
+	Adapter provider.CLIAdapter
+
+	// Caps declares the static capability set Sessions produced by this
+	// Runtime expose. Default zero value declares no capabilities.
+	Caps Capabilities
+
+	// BuildArgs, when non-nil, overrides the adapter's BuildArgs for
+	// constructing per-turn CLI argv. The default uses adapter.BuildArgs
+	// with the prompt = SendInput payload, an empty system prompt, and
+	// the StartOptions.SessionIDPreset on the first turn (then the most
+	// recent observed session_id). Most consumers leave this nil.
+	BuildArgs func(prompt, sessionID string) []string
+
+	// WaitDelay is the grace period between SIGTERM (on context cancel)
+	// and SIGKILL passed to runner.Run. Zero uses the runner's default.
+	WaitDelay time.Duration
+}
+
+// NewFromAdapter constructs a Runtime backed by cfg.Adapter. Sessions
+// produced by Start drive runner.Run per turn.
+//
+// Single-turn-in-flight semantics: a second SendInput while a turn is
+// running returns ErrTurnInFlight without queueing.
+//
+// Caps().BinaryRequired is honored — Prepare returns an error if the
+// adapter's Detect() finds no binary.
+func NewFromAdapter(cfg AdapterRuntimeConfig) (Runtime, error) {
+	if cfg.ID == "" {
+		return nil, errors.New("agentsessions: AdapterRuntimeConfig.ID is required")
+	}
+	if cfg.Adapter == nil {
+		return nil, errors.New("agentsessions: AdapterRuntimeConfig.Adapter is required")
+	}
+	if cfg.Kind == "" {
+		cfg.Kind = "cli"
+	}
+	return &adapterRuntime{cfg: cfg}, nil
+}
+
+// adapterRuntime wraps a CLIAdapter as a Runtime.
+type adapterRuntime struct {
+	cfg AdapterRuntimeConfig
+}
+
+func (r *adapterRuntime) ID() string          { return r.cfg.ID }
+func (r *adapterRuntime) Kind() string        { return r.cfg.Kind }
+func (r *adapterRuntime) Caps() Capabilities  { return r.cfg.Caps }
+
+func (r *adapterRuntime) Prepare(ctx context.Context) error {
+	if !r.cfg.Caps.BinaryRequired {
+		return nil
+	}
+	if _, ok := r.cfg.Adapter.Detect(); !ok {
+		return fmt.Errorf("agentsessions: adapter %q binary not found", r.cfg.Adapter.Name())
+	}
+	return nil
+}
+
+func (r *adapterRuntime) Start(ctx context.Context, opts StartOptions) (Session, error) {
+	if opts.Workdir == "" {
+		return nil, errors.New("agentsessions: StartOptions.Workdir is required for adapter runtime")
+	}
+	s := &adapterSession{
+		runtime:    r,
+		opts:       opts,
+		buildArgs:  r.cfg.BuildArgs,
+		stopCh:     make(chan struct{}),
+		done:       make(chan struct{}),
+	}
+	s.sessionID.Store(opts.SessionIDPreset)
+	s.alive.Store(true)
+	s.state.Store(int32(LiveStateIdle))
+	if s.buildArgs == nil {
+		s.buildArgs = func(prompt, sessionID string) []string {
+			return r.cfg.Adapter.BuildArgs(prompt, "", sessionID)
+		}
+	}
+	return s, nil
+}
+
+// adapterSession is the Session a CLIAdapter produces. SendInput drives
+// runner.Run; Stop closes stopCh, which triggers any in-flight runner
+// context cancel; Wait blocks on done (closed when Stop has fully
+// drained).
+type adapterSession struct {
+	runtime  *adapterRuntime
+	opts     StartOptions
+	buildArgs func(prompt, sessionID string) []string
+
+	sessionID atomic.Value // string — last observed provider session_id
+
+	state  atomic.Int32 // LiveState
+	alive  atomic.Bool
+	pid    atomic.Int32
+	turnID atomic.Value // string
+
+	stopCh chan struct{}
+	stopOnce sync.Once
+
+	done     chan struct{}
+	doneOnce sync.Once
+	exitCode atomic.Int32
+
+	// turnMu serializes SendInput at the adapter layer. The Manager
+	// also serializes via inputMu, but turnMu lets adapter consumers
+	// (compliance harness, integration tests) hit the same guarantee
+	// when bypassing the Manager.
+	turnMu sync.Mutex
+	turnInFlight atomic.Bool
+}
+
+func (s *adapterSession) Wait() (int, error) {
+	<-s.done
+	return int(s.exitCode.Load()), nil
+}
+
+func (s *adapterSession) Stop(ctx context.Context) error {
+	s.stopOnce.Do(func() {
+		s.alive.Store(false)
+		s.state.Store(int32(LiveStateStopped))
+		close(s.stopCh)
+	})
+	// Stop is non-blocking on adapter sessions: there is no long-lived
+	// process to drain; turn-in-flight is cancelled via stopCh, which
+	// the runner's context observes.
+	s.doneOnce.Do(func() { close(s.done) })
+	return nil
+}
+
+func (s *adapterSession) SendInput(ctx context.Context, data []byte) error {
+	if !s.alive.Load() {
+		return ErrNoInputChannel
+	}
+	if !s.turnInFlight.CompareAndSwap(false, true) {
+		return ErrTurnInFlight
+	}
+	defer s.turnInFlight.Store(false)
+
+	s.turnMu.Lock()
+	defer s.turnMu.Unlock()
+
+	prompt := string(data)
+	sessionID, _ := s.sessionID.Load().(string)
+	args := s.buildArgs(prompt, sessionID)
+
+	turnID := defaultIDFn()
+	s.turnID.Store(turnID)
+	s.state.Store(int32(LiveStateProcessing))
+	defer s.state.Store(int32(LiveStateIdle))
+
+	// Cancel the run if Stop fires while the runner is mid-flight.
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go func() {
+		select {
+		case <-s.stopCh:
+			cancel()
+		case <-runCtx.Done():
+		}
+	}()
+
+	cfg := runner.Config{
+		Provider:  s.runtime.cfg.Adapter,
+		Profile:   s.opts.Profile,
+		Workspace: s.opts.Workdir,
+		Args:      args,
+		Env:       s.opts.Env,
+		WaitDelay: s.runtime.cfg.WaitDelay,
+		OnEvent:   s.handleRunnerEvent,
+	}
+	err := runner.Run(runCtx, cfg)
+	if err != nil {
+		s.exitCode.Store(1)
+		return err
+	}
+	return nil
+}
+
+// handleRunnerEvent forwards runner events to the Fanout writer (which
+// the Manager has wired to the attach broker if AttachEnabled). It also
+// captures process pid + the first observed session id so Health reports
+// the live state and OnSessionID fires once per turn.
+func (s *adapterSession) handleRunnerEvent(ev runner.Event) {
+	switch ev.Kind {
+	case runner.EventProcessStarted:
+		if pid, ok := ev.Payload["pid"].(int); ok {
+			s.pid.Store(int32(pid))
+		}
+	case runner.EventProviderEvent:
+		if pe, ok := ev.Payload["event"].(provider.StreamEvent); ok {
+			if pe.Type == provider.EventSessionID && pe.SessionID != "" {
+				s.sessionID.Store(pe.SessionID)
+				if s.opts.OnSessionID != nil {
+					s.opts.OnSessionID(pe.SessionID)
+				}
+			}
+			if s.opts.Fanout != nil {
+				if line, ok := encodeStreamEvent(pe); ok {
+					_, _ = s.opts.Fanout.Write(line)
+				}
+			}
+		}
+	case runner.EventProcessExited:
+		s.pid.Store(0)
+	case runner.EventProcessTimeout:
+		s.pid.Store(0)
+	}
+}
+
+func (s *adapterSession) Resize(ctx context.Context, rows, cols uint16) error {
+	// Subprocess adapters have no PTY to resize.
+	return nil
+}
+
+func (s *adapterSession) Health() HealthStatus {
+	turnID, _ := s.turnID.Load().(string)
+	return HealthStatus{
+		Alive:  s.alive.Load(),
+		PID:    int(s.pid.Load()),
+		State:  LiveState(s.state.Load()),
+		TurnID: turnID,
+	}
+}
+
+func (s *adapterSession) CheckpointHints() (CheckpointHint, bool) {
+	if !s.runtime.cfg.Caps.CheckpointResume {
+		return nil, false
+	}
+	id, _ := s.sessionID.Load().(string)
+	if id == "" {
+		return nil, false
+	}
+	return CheckpointHint(id), true
+}
+
+// ProviderSessionID implements SessionIDer when the runtime declares
+// Caps().ProviderSessionID == true. Returns the empty string before the
+// first turn observes a session id.
+func (s *adapterSession) ProviderSessionID() string {
+	id, _ := s.sessionID.Load().(string)
+	return id
+}
+
+// encodeStreamEvent renders ev for the attach broker. Plain-text
+// EventDelta is forwarded as-is; everything else is rendered as a short
+// labelled line so subscribers can see turn boundaries / errors / usage
+// without the lib having to define a wire format. Adapters that want a
+// richer wire format (jsonl, etc.) substitute their own Fanout-shaped
+// writer at the consumer layer — this is just the default tee.
+func encodeStreamEvent(ev provider.StreamEvent) ([]byte, bool) {
+	switch ev.Type {
+	case provider.EventDelta:
+		if ev.Content == "" {
+			return nil, false
+		}
+		return []byte(ev.Content), true
+	case provider.EventToolUse:
+		if ev.ToolUse == nil {
+			return nil, false
+		}
+		return []byte(fmt.Sprintf("\n[tool_use:%s]\n", ev.ToolUse.Name)), true
+	case provider.EventError:
+		return []byte(fmt.Sprintf("\n[error] %s\n", ev.Error)), true
+	case provider.EventDone:
+		return []byte("\n[turn_done]\n"), true
+	}
+	return nil, false
+}
