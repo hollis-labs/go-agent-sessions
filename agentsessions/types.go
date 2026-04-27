@@ -140,6 +140,15 @@ type StartOptions struct {
 	// EnvVars() into this slice before calling Start.
 	Env []string
 
+	// Stderr, when non-nil, is forwarded to runner.Config.Stderr in the
+	// adapter-driven runtime so the spawned subprocess's stderr writes
+	// land on the caller-supplied writer. Use io.MultiWriter to fan out
+	// (e.g. an in-memory tail buffer plus a sidecar log file). Nil leaves
+	// runner-level stderr handling at its default (cmd.Stderr unset →
+	// os/exec routes to os.DevNull). This field is a no-op for the
+	// provider-driven runtime (HTTP transport, no subprocess).
+	Stderr io.Writer
+
 	// Profile is the resolved go-sandbox profile. The zero-value
 	// sandbox.Profile (empty ID) disables sandbox wrapping. A non-zero
 	// profile on an unsupported platform is a hard launch failure (per

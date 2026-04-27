@@ -111,6 +111,32 @@ Sends are non-blocking. A full `EventFanout` channel drops events
 silently, so callers should provide a buffered channel and must not
 close it until the session is fully done.
 
+### Stderr passthrough
+
+Adapter-driven sessions forward `StartOptions.Stderr` to
+`runner.Config.Stderr`, so a caller-supplied `io.Writer` receives the
+spawned subprocess's stderr verbatim. Use `io.MultiWriter` to fan out
+(in-memory tail buffer + sidecar log file is the typical shape):
+
+```go
+var tail bytes.Buffer
+sidecar, _ := os.OpenFile(sidecarPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+defer sidecar.Close()
+
+m.Start(ctx, agentsessions.StartRequest{
+    ID: "session-abc",
+    Runtime: rt,
+    Options: agentsessions.StartOptions{
+        Workdir: ws,
+        Stderr:  io.MultiWriter(&tail, sidecar),
+    },
+})
+```
+
+Nil leaves runner-level stderr handling at its default (`cmd.Stderr`
+unset → `os/exec` routes to `os.DevNull`). The provider-driven runtime
+ignores this field — there is no spawned subprocess to wire stderr to.
+
 ### Compose with go-egress-proxy
 
 ```go

@@ -77,8 +77,89 @@ func writeTestScript(t *testing.T, dir string, lines []string) string {
 	return path
 }
 
+// writeTestScriptWithStderr is writeTestScript plus a single line emitted
+// to stderr before the stdout stream. Used for stderr-passthrough tests.
+func writeTestScriptWithStderr(t *testing.T, dir, stderrLine string, stdoutLines []string) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("test script needs sh; not running on Windows")
+	}
+	path := filepath.Join(dir, "fake-cli-stderr.sh")
+	body := "#!/bin/sh\n"
+	body += "printf '%s\\n' " + shellQuote(stderrLine) + " 1>&2\n"
+	for _, l := range stdoutLines {
+		body += "printf '%s\\n' " + shellQuote(l) + "\n"
+	}
+	body += "exit 0\n"
+	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+	return path
+}
+
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+}
+
+func TestStartOptions_Stderr_CapturesToWriter(t *testing.T) {
+	dir := t.TempDir()
+	script := writeTestScriptWithStderr(t, dir, "diagnostic-line",
+		[]string{"delta:hi", "done"})
+
+	rt, err := NewFromAdapter(AdapterRuntimeConfig{
+		ID:      "stderr-passthrough",
+		Kind:    "cli",
+		Adapter: &echoAdapter{script: script},
+	})
+	if err != nil {
+		t.Fatalf("NewFromAdapter: %v", err)
+	}
+
+	var stderrBuf bytes.Buffer
+	sess, err := rt.Start(context.Background(), StartOptions{
+		Workdir: dir,
+		Stderr:  &stderrBuf,
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = sess.Stop(context.Background()) }()
+
+	if err := sess.SendInput(context.Background(), []byte("ignored")); err != nil {
+		t.Fatalf("SendInput: %v", err)
+	}
+
+	got := stderrBuf.String()
+	if !strings.Contains(got, "diagnostic-line") {
+		t.Errorf("Stderr buffer = %q, want to contain %q", got, "diagnostic-line")
+	}
+}
+
+func TestStartOptions_Stderr_NilLeavesStderrUnset(t *testing.T) {
+	// Sanity: nil Stderr (the v0.2.0 zero-value default) does not regress
+	// the no-knob behavior — Run completes cleanly and any subprocess
+	// stderr is discarded per os/exec's default for cmd.Stderr=nil.
+	dir := t.TempDir()
+	script := writeTestScriptWithStderr(t, dir, "should-be-discarded",
+		[]string{"delta:hi", "done"})
+
+	rt, err := NewFromAdapter(AdapterRuntimeConfig{
+		ID:      "stderr-nil",
+		Kind:    "cli",
+		Adapter: &echoAdapter{script: script},
+	})
+	if err != nil {
+		t.Fatalf("NewFromAdapter: %v", err)
+	}
+	sess, err := rt.Start(context.Background(), StartOptions{Workdir: dir})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = sess.Stop(context.Background()) }()
+
+	if err := sess.SendInput(context.Background(), []byte("ignored")); err != nil {
+		t.Fatalf("SendInput: %v", err)
+	}
 }
 
 func TestAdapterRuntime_EndToEnd_DrivesRunnerAndCapturesEvents(t *testing.T) {

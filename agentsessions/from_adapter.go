@@ -191,6 +191,7 @@ func (s *adapterSession) SendInput(ctx context.Context, data []byte) error {
 		Workspace: s.opts.Workdir,
 		Args:      args,
 		Env:       s.opts.Env,
+		Stderr:    s.opts.Stderr,
 		WaitDelay: s.runtime.cfg.WaitDelay,
 		OnEvent:   s.handleRunnerEvent,
 	}
