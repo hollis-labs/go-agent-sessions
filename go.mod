@@ -8,10 +8,6 @@ require (
 	github.com/hollis-labs/go-sandbox v0.1.0
 )
 
-// Local-dev replace until go-runner v0.2.0 publishes its tag.
-// Remove this block when CW-20260427-0044's tag is cut + pushed.
-replace github.com/hollis-labs/go-runner => ../go-runner
-
 require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/creack/pty v1.1.24 // indirect
