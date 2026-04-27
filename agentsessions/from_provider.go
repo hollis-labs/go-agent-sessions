@@ -63,9 +63,9 @@ type providerRuntime struct {
 	cfg ProviderRuntimeConfig
 }
 
-func (r *providerRuntime) ID() string          { return r.cfg.ID }
-func (r *providerRuntime) Kind() string        { return r.cfg.Kind }
-func (r *providerRuntime) Caps() Capabilities  { return r.cfg.Caps }
+func (r *providerRuntime) ID() string         { return r.cfg.ID }
+func (r *providerRuntime) Kind() string       { return r.cfg.Kind }
+func (r *providerRuntime) Caps() Capabilities { return r.cfg.Caps }
 
 func (r *providerRuntime) Prepare(ctx context.Context) error {
 	// Provider-backed runtimes are in-process; nothing to validate at
@@ -99,9 +99,9 @@ type providerSession struct {
 	opts    StartOptions
 	system  string
 
-	state    atomic.Int32 // LiveState
-	alive    atomic.Bool
-	turnID   atomic.Value // string
+	state  atomic.Int32 // LiveState
+	alive  atomic.Bool
+	turnID atomic.Value // string
 
 	mu       sync.Mutex
 	messages []provider.ChatMessage
@@ -158,6 +158,7 @@ func (s *providerSession) SendInput(ctx context.Context, data []byte) error {
 
 	var assistant string
 	for ev := range stream {
+		tryEventFanout(s.opts.EventFanout, ev)
 		switch ev.Type {
 		case provider.EventDelta:
 			assistant += ev.Content

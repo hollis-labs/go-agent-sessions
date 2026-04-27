@@ -33,9 +33,8 @@ subscribers via the broker.
 - Consumers that want the bytes-as-stream view: use
   `Manager.AttachWith` (broker is already there).
 - Consumers that want each parsed `provider.StreamEvent` as a
-  structured event: pass a custom `Fanout` writer at Start time, or
-  wrap the Adapter to mirror events to a side channel before they hit
-  the runner. The library ships nothing for this — Fanout is the seam.
+  structured event: use `StartOptions.EventFanout`. The byte
+  `Fanout` remains available in parallel for raw streaming.
 - The library reserves the right to add **purely Manager-owned** event
   kinds to `LifecycleEventKind` in future versions (e.g.
   `session.attached`, `session.health_degraded`). The SessionID +

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -107,8 +108,8 @@ func TestAdapterRuntime_EndToEnd_DrivesRunnerAndCapturesEvents(t *testing.T) {
 	var fanout bytes.Buffer
 	var observedSessionID string
 	sess, err := rt.Start(context.Background(), StartOptions{
-		Workdir: dir,
-		Fanout:  &fanout,
+		Workdir:     dir,
+		Fanout:      &fanout,
 		OnSessionID: func(id string) { observedSessionID = id },
 	})
 	if err != nil {
@@ -261,5 +262,196 @@ func TestAdapterRuntime_PrepareReportsMissingBinary(t *testing.T) {
 	})
 	if err := rt.Prepare(context.Background()); err == nil {
 		t.Errorf("Prepare = nil, want error for missing binary")
+	}
+}
+
+func TestStartOptions_EventFanout_DeliversToBothFanouts(t *testing.T) {
+	dir := t.TempDir()
+	script := writeTestScript(t, dir, []string{
+		"session:ses_abc123",
+		"delta:hello",
+		"done",
+	})
+	rt, err := NewFromAdapter(AdapterRuntimeConfig{
+		ID:      "event-fanout-both",
+		Kind:    "cli",
+		Adapter: &echoAdapter{script: script},
+	})
+	if err != nil {
+		t.Fatalf("NewFromAdapter: %v", err)
+	}
+
+	var fanout bytes.Buffer
+	eventCh := make(chan provider.StreamEvent, 8)
+	sess, err := rt.Start(context.Background(), StartOptions{
+		Workdir:     dir,
+		Fanout:      &fanout,
+		EventFanout: eventCh,
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = sess.Stop(context.Background()) }()
+
+	if err := sess.SendInput(context.Background(), []byte("ignored")); err != nil {
+		t.Fatalf("SendInput: %v", err)
+	}
+
+	want := []provider.StreamEvent{
+		{Type: provider.EventSessionID, SessionID: "ses_abc123"},
+		{Type: provider.EventDelta, Content: "hello"},
+		{Type: provider.EventDone},
+	}
+	if got := takeEvents(eventCh, len(want)); !reflect.DeepEqual(got, want) {
+		t.Fatalf("EventFanout events = %#v, want %#v", got, want)
+	}
+	if got := fanout.String(); got != "hello\n[turn_done]\n" {
+		t.Fatalf("byte Fanout = %q, want %q", got, "hello\n[turn_done]\n")
+	}
+}
+
+func TestStartOptions_EventFanout_NilByteFanout_StillWorks(t *testing.T) {
+	dir := t.TempDir()
+	script := writeTestScript(t, dir, []string{
+		"session:ses_onlytyped",
+		"delta:typed-only",
+		"done",
+	})
+	rt, err := NewFromAdapter(AdapterRuntimeConfig{
+		ID:      "event-fanout-typed-only",
+		Kind:    "cli",
+		Adapter: &echoAdapter{script: script},
+	})
+	if err != nil {
+		t.Fatalf("NewFromAdapter: %v", err)
+	}
+
+	eventCh := make(chan provider.StreamEvent, 8)
+	sess, err := rt.Start(context.Background(), StartOptions{
+		Workdir:     dir,
+		EventFanout: eventCh,
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = sess.Stop(context.Background()) }()
+
+	if err := sess.SendInput(context.Background(), []byte("ignored")); err != nil {
+		t.Fatalf("SendInput: %v", err)
+	}
+
+	want := []provider.StreamEvent{
+		{Type: provider.EventSessionID, SessionID: "ses_onlytyped"},
+		{Type: provider.EventDelta, Content: "typed-only"},
+		{Type: provider.EventDone},
+	}
+	if got := takeEvents(eventCh, len(want)); !reflect.DeepEqual(got, want) {
+		t.Fatalf("EventFanout events = %#v, want %#v", got, want)
+	}
+}
+
+func TestStartOptions_EventFanout_SlowConsumer_DropsNotBlocks(t *testing.T) {
+	dir := t.TempDir()
+	script := writeTestScript(t, dir, []string{
+		"delta:one",
+		"delta:two",
+		"delta:three",
+		"done",
+	})
+	rt, err := NewFromAdapter(AdapterRuntimeConfig{
+		ID:      "event-fanout-slow",
+		Kind:    "cli",
+		Adapter: &echoAdapter{script: script},
+	})
+	if err != nil {
+		t.Fatalf("NewFromAdapter: %v", err)
+	}
+
+	eventCh := make(chan provider.StreamEvent, 1)
+	sess, err := rt.Start(context.Background(), StartOptions{
+		Workdir:     dir,
+		EventFanout: eventCh,
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = sess.Stop(context.Background()) }()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- sess.SendInput(context.Background(), []byte("ignored"))
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("SendInput: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("SendInput blocked on slow EventFanout consumer")
+	}
+
+	got := drainEvents(eventCh)
+	if len(got) != 1 {
+		t.Fatalf("received %d typed events, want exactly 1 buffered event after drops", len(got))
+	}
+}
+
+func TestStartOptions_EventFanout_NilPreservesV010Behavior(t *testing.T) {
+	dir := t.TempDir()
+	script := writeTestScript(t, dir, []string{
+		"delta:hello, ",
+		"delta:world",
+		"done",
+	})
+	rt, err := NewFromAdapter(AdapterRuntimeConfig{
+		ID:      "event-fanout-nil",
+		Kind:    "cli",
+		Adapter: &echoAdapter{script: script},
+	})
+	if err != nil {
+		t.Fatalf("NewFromAdapter: %v", err)
+	}
+
+	var fanout bytes.Buffer
+	sess, err := rt.Start(context.Background(), StartOptions{
+		Workdir: dir,
+		Fanout:  &fanout,
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = sess.Stop(context.Background()) }()
+
+	if err := sess.SendInput(context.Background(), []byte("ignored")); err != nil {
+		t.Fatalf("SendInput: %v", err)
+	}
+	if got := fanout.String(); got != "hello, world\n[turn_done]\n" {
+		t.Fatalf("byte Fanout = %q, want %q", got, "hello, world\n[turn_done]\n")
+	}
+}
+
+func takeEvents(ch <-chan provider.StreamEvent, n int) []provider.StreamEvent {
+	out := make([]provider.StreamEvent, 0, n)
+	for i := 0; i < n; i++ {
+		select {
+		case ev := <-ch:
+			out = append(out, ev)
+		case <-time.After(2 * time.Second):
+			return out
+		}
+	}
+	return out
+}
+
+func drainEvents(ch <-chan provider.StreamEvent) []provider.StreamEvent {
+	var out []provider.StreamEvent
+	for {
+		select {
+		case ev := <-ch:
+			out = append(out, ev)
+		default:
+			return out
+		}
 	}
 }

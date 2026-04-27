@@ -76,6 +76,41 @@ Each `SendInput` appends a user message to the rolling conversation and
 drives `Provider.StreamChat`; deltas land on `Fanout`; `EventDone`
 finishes the turn. Conversation state lives in the Session.
 
+### Typed event fanout
+
+If a consumer needs parsed `provider.StreamEvent` values directly, set
+`StartOptions.EventFanout`. It mirrors typed events alongside the
+existing byte `Fanout`; it does not replace it.
+
+```go
+events := make(chan provider.StreamEvent, 64) // buffer for your consumer
+
+err = m.Start(ctx, agentsessions.StartRequest{
+    ID:      "session-abc",
+    Runtime: rt,
+    Options: agentsessions.StartOptions{
+        Workdir:     "/path/to/workspace",
+        Fanout:      rawLogWriter, // optional: raw bytes still flow here
+        EventFanout: events,       // optional: parsed events mirror here
+    },
+})
+
+go func() {
+    for ev := range events {
+        switch ev.Type {
+        case provider.EventDelta:
+            render(ev.Content)
+        case provider.EventToolUse:
+            showTool(ev.ToolUse)
+        }
+    }
+}()
+```
+
+Sends are non-blocking. A full `EventFanout` channel drops events
+silently, so callers should provide a buffered channel and must not
+close it until the session is fully done.
+
 ### Compose with go-egress-proxy
 
 ```go
@@ -161,9 +196,11 @@ Out (intentionally):
 - **Hot-reload of capabilities.** `Caps()` is immutable for the
   Runtime's lifetime. Adapters that need version-dependent caps
   construct a fresh Runtime per launch.
-- **Provider event mirroring on EventSink.** EventSink emits only
-  Manager-owned lifecycle events. Per-turn provider events flow through
-  `Fanout`. See `docs/decisions/0002-eventsink-shape.md`.
+- **Provider events on EventSink.** EventSink emits only Manager-owned
+  lifecycle events. Per-turn provider events flow through `Fanout`
+  and, optionally, `EventFanout`. See
+  `docs/decisions/0002-eventsink-shape.md` and
+  `docs/decisions/0005-typed-event-fanout.md`.
 
 ## Wave-0 design decisions
 
@@ -176,6 +213,7 @@ Resolved during the v0.1.0 implementation; full rationale in
 | Should EventSink flatten runner + provider events? | No — EventSink is for Manager lifecycle only. Provider events flow through Fanout. | [0002](docs/decisions/0002-eventsink-shape.md) |
 | Default ring + subscriber depth? | 64 KiB / 64 chunks (mux baseline), tunable per-Session via StartOptions. | [0003](docs/decisions/0003-ring-defaults-tunable.md) |
 | Does Wait wait for attach subscribers to drain? | No — returns on terminal state. Subscribers see EOF when the broker closes. | [0004](docs/decisions/0004-wait-returns-on-terminal.md) |
+| How do consumers receive parsed provider events? | Optional `EventFanout` mirrors typed events alongside byte `Fanout`; sends drop rather than block. | [0005](docs/decisions/0005-typed-event-fanout.md) |
 
 ## Repository layout
 

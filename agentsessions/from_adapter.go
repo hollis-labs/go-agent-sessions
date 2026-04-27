@@ -68,9 +68,9 @@ type adapterRuntime struct {
 	cfg AdapterRuntimeConfig
 }
 
-func (r *adapterRuntime) ID() string          { return r.cfg.ID }
-func (r *adapterRuntime) Kind() string        { return r.cfg.Kind }
-func (r *adapterRuntime) Caps() Capabilities  { return r.cfg.Caps }
+func (r *adapterRuntime) ID() string         { return r.cfg.ID }
+func (r *adapterRuntime) Kind() string       { return r.cfg.Kind }
+func (r *adapterRuntime) Caps() Capabilities { return r.cfg.Caps }
 
 func (r *adapterRuntime) Prepare(ctx context.Context) error {
 	if !r.cfg.Caps.BinaryRequired {
@@ -87,11 +87,11 @@ func (r *adapterRuntime) Start(ctx context.Context, opts StartOptions) (Session,
 		return nil, errors.New("agentsessions: StartOptions.Workdir is required for adapter runtime")
 	}
 	s := &adapterSession{
-		runtime:    r,
-		opts:       opts,
-		buildArgs:  r.cfg.BuildArgs,
-		stopCh:     make(chan struct{}),
-		done:       make(chan struct{}),
+		runtime:   r,
+		opts:      opts,
+		buildArgs: r.cfg.BuildArgs,
+		stopCh:    make(chan struct{}),
+		done:      make(chan struct{}),
 	}
 	s.sessionID.Store(opts.SessionIDPreset)
 	s.alive.Store(true)
@@ -109,8 +109,8 @@ func (r *adapterRuntime) Start(ctx context.Context, opts StartOptions) (Session,
 // context cancel; Wait blocks on done (closed when Stop has fully
 // drained).
 type adapterSession struct {
-	runtime  *adapterRuntime
-	opts     StartOptions
+	runtime   *adapterRuntime
+	opts      StartOptions
 	buildArgs func(prompt, sessionID string) []string
 
 	sessionID atomic.Value // string — last observed provider session_id
@@ -120,7 +120,7 @@ type adapterSession struct {
 	pid    atomic.Int32
 	turnID atomic.Value // string
 
-	stopCh chan struct{}
+	stopCh   chan struct{}
 	stopOnce sync.Once
 
 	done     chan struct{}
@@ -131,7 +131,7 @@ type adapterSession struct {
 	// also serializes via inputMu, but turnMu lets adapter consumers
 	// (compliance harness, integration tests) hit the same guarantee
 	// when bypassing the Manager.
-	turnMu sync.Mutex
+	turnMu       sync.Mutex
 	turnInFlight atomic.Bool
 }
 
@@ -220,6 +220,7 @@ func (s *adapterSession) handleRunnerEvent(ev runner.Event) {
 					s.opts.OnSessionID(pe.SessionID)
 				}
 			}
+			tryEventFanout(s.opts.EventFanout, pe)
 			if s.opts.Fanout != nil {
 				if line, ok := encodeStreamEvent(pe); ok {
 					_, _ = s.opts.Fanout.Write(line)

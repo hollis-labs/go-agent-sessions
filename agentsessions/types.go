@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 
+	"github.com/hollis-labs/go-providers/provider"
 	"github.com/hollis-labs/go-sandbox/sandbox"
 )
 
@@ -115,7 +116,8 @@ type SessionIDer interface {
 // spawn a Session. Fanout, when non-nil, receives a copy of the session's
 // output stream so the Manager can broadcast to attach subscribers — CLI
 // runtimes tee PTY bytes / parsed event lines into it; API runtimes
-// forward streamed assistant tokens.
+// forward streamed assistant tokens. EventFanout, when non-nil, receives
+// the parsed provider.StreamEvent values alongside the byte Fanout.
 type StartOptions struct {
 	// Workdir is the absolute path used as the spawned process's working
 	// directory and as the workspace argument to sandbox.Apply.
@@ -147,6 +149,13 @@ type StartOptions struct {
 	// Fanout receives a tee of session output for the attach broker. Set
 	// by the Manager — adapters do not allocate this.
 	Fanout io.Writer
+
+	// EventFanout receives parsed provider.StreamEvent values as a
+	// best-effort mirror of the session stream. Sends are non-blocking;
+	// when the channel is full the event is dropped silently. Callers
+	// should supply a buffered channel sized to their consumer's
+	// tolerance and must not close it before the session is done.
+	EventFanout chan<- provider.StreamEvent
 
 	// SessionIDPreset, when non-empty, is the provider-side session id
 	// the adapter should use as `--resume <id>` on the very first turn.

@@ -34,6 +34,7 @@ import (
 	"time"
 
 	"github.com/hollis-labs/go-agent-sessions/agentsessions"
+	"github.com/hollis-labs/go-providers/provider"
 )
 
 // Harness configures a compliance run for one Runtime.
@@ -50,6 +51,10 @@ type Harness struct {
 	// as skipped. Use when the binary is not guaranteed to be present
 	// in the test environment.
 	BinarySkip bool
+
+	// SkipEventFanout skips the baseline typed-event-fanout check for
+	// runtimes that legitimately cannot expose parsed stream events.
+	SkipEventFanout bool
 }
 
 // Run executes the full compliance suite for the runtime described by h.
@@ -69,7 +74,7 @@ func Run(t *testing.T, h Harness) {
 	}
 
 	t.Run("Baseline", func(t *testing.T) {
-		runBaseline(t, rt, startOptsFn, h.BinarySkip)
+		runBaseline(t, rt, startOptsFn, h.BinarySkip, h.SkipEventFanout)
 	})
 	if caps.PTY {
 		t.Run("CapsPTY", func(t *testing.T) {
@@ -104,7 +109,7 @@ type startOptsFn = func(t *testing.T) agentsessions.StartOptions
 // Baseline suite
 // ---------------------------------------------------------------------------
 
-func runBaseline(t *testing.T, rt agentsessions.Runtime, opts startOptsFn, binarySkip bool) {
+func runBaseline(t *testing.T, rt agentsessions.Runtime, opts startOptsFn, binarySkip, skipEventFanout bool) {
 	t.Helper()
 	t.Run("KindNonEmpty", func(t *testing.T) {
 		if rt.Kind() == "" {
@@ -192,6 +197,30 @@ func runBaseline(t *testing.T, rt agentsessions.Runtime, opts startOptsFn, binar
 		sess := mustStart(t, rt, opts(t))
 		defer func() { _ = sess.Stop(context.Background()) }()
 		_, _ = sess.CheckpointHints()
+	})
+	t.Run("EventFanoutReceivesParsedEvents", func(t *testing.T) {
+		if skipEventFanout {
+			t.Skip("SkipEventFanout=true")
+		}
+		if binarySkip {
+			t.Skip("BinarySkip=true: binary not available")
+		}
+		o := opts(t)
+		ch := make(chan provider.StreamEvent, 8)
+		o.EventFanout = ch
+		sess := mustStart(t, rt, o)
+		defer func() { _ = sess.Stop(context.Background()) }()
+		if err := sess.SendInput(context.Background(), []byte("compliance event fanout")); err != nil {
+			t.Fatalf("SendInput: %v", err)
+		}
+		select {
+		case ev := <-ch:
+			if ev.Type == "" {
+				t.Errorf("first EventFanout event has empty Type")
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("EventFanout did not receive a parsed event within 2s")
+		}
 	})
 }
 
