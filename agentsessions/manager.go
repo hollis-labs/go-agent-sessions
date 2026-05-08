@@ -135,12 +135,14 @@ type entry struct {
 	inputMu sync.Mutex
 }
 
-// sessionResult holds the exit code of a terminated session. done is
-// closed once the watch goroutine records the terminal state; exitCode
-// is safe to read after that (close is a synchronization barrier).
+// sessionResult holds the exit code and Session.Wait error of a
+// terminated session. done is closed once the watch goroutine records
+// the terminal state; exitCode and exitErr are safe to read after that
+// (close is a synchronization barrier).
 type sessionResult struct {
 	done     chan struct{}
 	exitCode int
+	exitErr  error
 }
 
 // NewManager constructs a Manager. sink may be nil — the Manager treats
@@ -289,7 +291,7 @@ func (m *Manager) emit(ctx context.Context, id string, from, to State, exit *int
 // cleanly, and delivers the exit code to any WaitSession callers.
 func (m *Manager) watch(id string, sess Session, broker *attachBroker) {
 	defer m.wg.Done()
-	code, _ := sess.Wait()
+	code, waitErr := sess.Wait()
 
 	m.mu.Lock()
 	var killing bool
@@ -317,6 +319,7 @@ func (m *Manager) watch(id string, sess Session, broker *attachBroker) {
 	}
 	if result != nil {
 		result.exitCode = code
+		result.exitErr = waitErr
 		close(result.done)
 	}
 }
@@ -480,8 +483,22 @@ func (m *Manager) AttachWith(ctx context.Context, id string, w io.Writer, opts A
 }
 
 // WaitSession blocks until the named session's watch goroutine records
-// its terminal state and returns the exit code. Returns
-// ErrSessionNotRunning if the session was never registered.
+// its terminal state and returns the exit code along with the underlying
+// error from Session.Wait. Returns ErrSessionNotRunning if the session
+// was never registered.
+//
+// The returned error is the verbatim Session.Wait return value:
+//   - nil for clean exits (code == 0 with no supervisor cause).
+//   - *ExitError (extractable via errors.As) when supervision triggered
+//     the termination — Cause classifies as idle_timeout, watchdog_kill,
+//     restart_exhausted, oom_kill, or resource_limit.
+//   - The underlying wait error (typically *exec.ExitError) for non-zero
+//     exits on non-supervised sessions.
+//
+// Behavior change vs. earlier versions: WaitSession previously discarded
+// Session.Wait's error and always returned nil on terminal state.
+// Consumers that treated err != nil as unexpected must update; the
+// terminations were always errors at the Session.Wait layer.
 //
 // WaitSession returns on terminal state regardless of attach subscribers
 // — drain ordering is the consumer's problem. Subscribers see EOF
@@ -495,7 +512,7 @@ func (m *Manager) WaitSession(ctx context.Context, id string) (int, error) {
 	}
 	select {
 	case <-r.done:
-		return r.exitCode, nil
+		return r.exitCode, r.exitErr
 	case <-ctx.Done():
 		return 0, ctx.Err()
 	}
