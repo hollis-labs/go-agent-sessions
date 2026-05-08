@@ -2,6 +2,7 @@ package agentsessions
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"sync"
@@ -214,4 +215,83 @@ func TestAttachBroker_SubscribeSince_SkipsSeenBytes(t *testing.T) {
 	if !bytes.Equal(replay, []byte("bbbb")) {
 		t.Errorf("replay = %q, want bbbb", replay)
 	}
+}
+
+// TestManager_AttachSinceSeq_RoundTrip_NoGapNoDup exercises the
+// disconnect-and-resume pattern through the Manager's public surface:
+// attach a consumer, push 10 chunks, disconnect at seq=5 bytes, reconnect
+// with SinceSeq=5, and assert that the second attach receives exactly the
+// trailing 5 bytes without duplication or gap.
+//
+// This is the public contract documented on AttachOptions.SinceSeq;
+// breaking this round-trip silently regresses any consumer that resumes
+// attaches after a transient disconnect.
+func TestManager_AttachSinceSeq_RoundTrip_NoGapNoDup(t *testing.T) {
+	m := NewManager(&memSink{})
+	rt := newFakeRuntime("rt-since", "test")
+	if err := m.Start(context.Background(), StartRequest{
+		ID:      "s",
+		Runtime: rt,
+		Options: StartOptions{
+			Workdir:       t.TempDir(),
+			AttachEnabled: true,
+		},
+	}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	sess := rt.lastSession()
+
+	// Push 10 bytes to the broker BEFORE any attach — these populate
+	// the ring so the future attach replays history.
+	for i := 0; i < 10; i++ {
+		sess.emit([]byte{byte('A' + i)})
+		time.Sleep(2 * time.Millisecond)
+	}
+
+	// First attach: no since_seq → expect full history (10 bytes).
+	first := &syncBuf{}
+	ctx1, cancel1 := context.WithCancel(context.Background())
+	done1 := make(chan struct{})
+	go func() {
+		defer close(done1)
+		_ = m.Attach(ctx1, "s", first)
+	}()
+	// Wait for replay to drain.
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if len(first.String()) >= 10 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := first.String(); got != "ABCDEFGHIJ" {
+		t.Fatalf("first attach replay = %q, want ABCDEFGHIJ", got)
+	}
+	cancel1()
+	<-done1
+
+	// Reconnect with SinceSeq=5 → should receive only "FGHIJ" (bytes 6-10).
+	second := &syncBuf{}
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	done2 := make(chan struct{})
+	go func() {
+		defer close(done2)
+		_ = m.AttachWith(ctx2, "s", second, AttachOptions{SinceSeq: 5})
+	}()
+	deadline = time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if len(second.String()) >= 5 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := second.String(); got != "FGHIJ" {
+		t.Errorf("resumed attach replay (since_seq=5) = %q, want FGHIJ (no gap, no dup)", got)
+	}
+	cancel2()
+	<-done2
+
+	// Cleanup: complete session so Manager.watch can drain.
+	sess.complete(0)
+	_, _ = m.WaitSession(context.Background(), "s")
 }

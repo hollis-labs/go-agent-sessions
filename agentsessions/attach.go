@@ -15,6 +15,54 @@ const (
 	defaultSubscriberDepth = 64
 )
 
+// Attach broker — public surface (frozen as of v0.4.0)
+//
+// The attach broker behind Manager.Attach / Manager.AttachWith is an
+// in-memory drop-oldest ring + per-subscriber drop-on-slow fanout. The
+// public observable contract is:
+//
+//   - Manager.Attach(ctx, sessionID, w) — replays whatever is currently in
+//     the ring to w, then streams live bytes until ctx is canceled or the
+//     session ends. Multiple concurrent Attach callers are supported;
+//     cancellation of one does not affect the others.
+//   - Manager.AttachWith(ctx, sessionID, w, AttachOptions) — same as above
+//     with caller-controlled metadata. AttachOptions.SinceSeq is a
+//     byte-count resume hint; the broker replays only ring bytes with
+//     position > SinceSeq. Round-trip semantics: a client that disconnected
+//     after observing N bytes can reconnect with SinceSeq=N and receive
+//     exactly bytes N+1..head with no duplication. If SinceSeq points
+//     before the ring's start (history evicted), the full ring is replayed
+//     and the gap between SinceSeq and ringStart is silently lost — callers
+//     detect this by comparing expected vs received byte counts.
+//   - StartOptions.RingBytes / StartOptions.SubscriberDepth tune the per-
+//     session ring size and per-subscriber channel depth. Zero uses the
+//     defaults (64 KiB / 64 chunks).
+//
+// Drop policy:
+//   - Ring: drop-oldest. When a Write would push the ring beyond ringCap,
+//     the leading bytes are evicted. Total bytes ever written are tracked
+//     so SinceSeq remains valid across evictions.
+//   - Subscriber channel: drop-newest (current chunk). When a subscriber's
+//     channel is full, the chunk is dropped for that subscriber only;
+//     other subscribers and the ring are unaffected. Bytes-dropped is
+//     counted on the broker but not currently exposed publicly.
+//   - Producer (Write): never blocks on subscriber slowness. Write returns
+//     io.ErrClosedPipe after broker close.
+//
+// Lifecycle:
+//   - The broker is allocated on Manager.Start when StartOptions.AttachEnabled
+//     is true. Without that flag, no broker memory is allocated and Attach
+//     calls return ErrAttachDisabled.
+//   - The broker is closed by the Manager's watch goroutine on session
+//     terminal state. Late subscribers after close still receive the
+//     replay (whatever's still in the ring) and an already-closed channel,
+//     so they drain and exit cleanly.
+//
+// This contract is frozen as of v0.4.0. Reform (drop-policy alternatives,
+// larger rings, etc.) is separate work; the audit deliverable for v0.4.0
+// is documentation + the SinceSeq round-trip test
+// (TestManager_AttachSinceSeq_RoundTrip_NoGapNoDup).
+
 // attachBroker multiplexes session output from a single producer (the
 // session's copy goroutine) to zero or more attach subscribers. It
 // implements io.Writer so it drops into a tee pipeline, and owns a
