@@ -104,6 +104,90 @@ Eliminates the Launch/SendInput race that bit consumers previously
 is non-empty, AutoFireFirstTurn is a no-op for the PTY runtime — the
 boot prompt was already written to ptmx during Start.
 
+### PTY supervision (idle-kill, restart-on-crash, watchdog)
+
+`StartOptions.Supervisor` enables opt-in process supervision against the
+long-lived PTY child. Idle-kill terminates ghost sessions when the user
+walks away; restart-on-crash recovers from agent segfaults without
+losing the conversation; the watchdog SIGKILLs stuck processes that
+won't respond to graceful signals.
+
+```go
+sess, err := rt.Start(ctx, agentsessions.StartOptions{
+    Workdir:      bootDir,
+    WorkspaceDir: workspaceDir,
+    Supervisor: &agentsessions.SupervisorOptions{
+        IdleKill:          15 * time.Minute, // ghost-session reaper
+        RestartOnCrash:    3,                // up to 3 restarts on non-zero exit
+        MaxRestartBackoff: 30 * time.Second,
+        WatchdogTimeout:   2 * time.Minute,  // immediate SIGKILL if stuck
+        OnRestart: func(attempt int, prev *agentsessions.ExitError) {
+            metrics.IncRestart(attempt, prev.Cause)
+        },
+    },
+})
+```
+
+Behavior:
+
+- **Idle-kill.** Tracks the most recent ptmx Read or Write timestamp.
+  After `IdleKill` of inactivity, sends SIGTERM, waits 5 s, then
+  SIGKILL. `ExitError.Cause = "idle_timeout"`. NOT restart-eligible.
+- **Restart-on-crash.** A non-zero exit with no supervisor cause set
+  triggers a backoff (1 s, 2 s, 4 s, ... capped at `MaxRestartBackoff`,
+  default 30 s) followed by `OnRestart` and a fresh spawn. Up to
+  `RestartOnCrash` retries. After exhaustion: `ExitError.Cause =
+  "restart_exhausted"`.
+- **Restart preserves `agent_session_id`.** When the adapter declares
+  `Caps.ProviderSessionID = true` and a session ID has been observed
+  via `EventSessionID` on a prior attempt, the most-recent ID is fed
+  into the next spawn's `BuildArgs` in place of the original
+  `SessionIDPreset`. This is the difference between *"restart preserves
+  the conversation"* and *"restart starts fresh."*
+- **Watchdog.** Fires SIGKILL immediately (no SIGTERM grace) when no
+  activity within `WatchdogTimeout`. `ExitError.Cause = "watchdog_kill"`.
+  Use a stricter watchdog when you have an `ActivityCallback` from
+  app-level progress signals; without one, watchdog falls back to ptmx
+  I/O ticks (effectively a stricter idle-kill).
+- **`OnRestart`** fires after backoff, before respawn. Receives the
+  attempt index (1-indexed) and the previous attempt's `*ExitError`.
+- **Adapter runtime (`Caps.PTY=false`):** Supervisor + ResourceLimits
+  are PTY-only in v0.6.0; on the adapter path these fields are
+  currently ignored. Tracked as a v0.6.x follow-up — blocked on
+  go-runner publishing its v0.3.0 supervision API.
+
+### PTY resource limits
+
+`StartOptions.ResourceLimits` applies OS-level resource caps to the
+spawned child. The wrap is identical to `go-runner` v0.3.0 — `sh -c
+"ulimit ...; exec ..."` on both platforms, plus `systemd-run --user
+--scope --property=MemoryMax=...` on Linux when systemd is available
+(real cgroup v2 OOM-kill).
+
+```go
+sess, err := rt.Start(ctx, agentsessions.StartOptions{
+    Workdir: bootDir,
+    LogPath: logPath,
+    ResourceLimits: &agentsessions.ResourceLimits{
+        CPUTime:      30 * time.Second,
+        MemoryMax:    512 * 1024 * 1024, // 512 MB
+        MaxOpenFiles: 1024,
+        MaxProcesses: 256,
+    },
+})
+```
+
+The wrap composes with `sandbox.Apply`: limits inherit through the
+sandbox-exec → real binary chain. `cmd.ExtraFiles` and stdin/stdout/
+stderr flow through unchanged because `sh`'s `exec` builtin re-execs
+in-place and `pty.Start` follows the chain.
+
+**macOS caveat.** `MemoryMax` is silently dropped on darwin — `RLIMIT_AS`
+isn't exposed via bash's `ulimit -v` and `systemd-run` is linux-only.
+For hard memory enforcement on macOS, run inside VM-based isolation
+(Lima / OrbStack / Docker Desktop). The CPU-time / open-files /
+processes / file-size limits work on darwin via `ulimit`.
+
 ### Typed event callback
 
 `StartOptions.TypedEventCallback` mirrors the existing
