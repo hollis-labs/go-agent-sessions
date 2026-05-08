@@ -2,6 +2,50 @@
 
 All notable changes to `go-agent-sessions` are documented in this file. Per-release notes are also published as GitHub Releases.
 
+## v0.6.0 — 2026-05-08
+
+PTY supervision and OS-level resource limits land natively on the long-lived PTY runtime. The v0.5.0 deferred wiring is now implemented per the path the v0.5.0 implementer flagged: a PTY-native restart loop wrapping `cmd.Wait`, with idle-kill / watchdog goroutines observing ptmx I/O directly — no retrofit of `go-runner.Supervisor` (the impedance mismatch with `creack/pty.Start` is unchanged from the v0.5.0 analysis).
+
+Authoritative cross-app design: `agent-workspaces/planning/agent-boot-unification/2026-05-07-cross-app-design.md` §10 (lib gaps) + the v0.6.0 implementer prompt at `agent-workspaces/execution/go-agent-sessions/2026-05-08-supervision/`.
+
+### Public API additions
+
+- **`StartOptions.Supervisor *SupervisorOptions`.** Opt-in supervision: `IdleKill`, `RestartOnCrash` + `MaxRestartBackoff`, `WatchdogTimeout`, `ActivityCallback`, and `OnRestart`. Field shape mirrors `go-runner` v0.3.0's `SupervisorOptions` — same names, same units — so a single supervisor config can target either runtime path once go-runner publishes its v0.3.0 API. Default nil preserves v0.5.0 single-shot behavior exactly.
+- **`StartOptions.ResourceLimits *ResourceLimits`.** Opt-in OS-level resource caps (`CPUTime`, `MemoryMax`, `MaxOpenFiles`, `MaxProcesses`, `MaxFileSize`). The wrap is `sh -c "ulimit ...; exec ..."` on both platforms, plus `systemd-run --user --scope --property=MemoryMax=...` on Linux when available (cgroup v2 OOM-kill). Composes with `sandbox.Apply` — limits inherit through the sandbox-exec → real binary chain. Default nil preserves v0.5.0 behavior.
+- **`*ExitError`.** Structured exit info returned via `Session.Wait` on the supervised path. Carries `Code`, `Signal`, `Killed`, `ProcessState`, `Cause`. `Cause` is one of `idle_timeout`, `watchdog_kill`, `restart_exhausted`, `oom_kill`, `resource_limit`, `pty_eof`, or empty for ordinary non-zero exits. Field shape mirrors `go-runner` v0.3.0's `ExitError`.
+- **`SessionIDer` on `ptySession`.** The PTY runtime now exposes `ProviderSessionID()` returning the most-recently observed provider session ID. Powers the restart-preserves-conversation behavior described below.
+
+### PTY supervision behavior
+
+- **Idle-kill** terminates the child after `IdleKill` of inactivity (no ptmx Read or Write). SIGTERM → 5 s grace → SIGKILL. `ExitError.Cause = "idle_timeout"`. Not restart-eligible (idle is the user walking away, not a crash).
+- **Restart-on-crash** re-spawns the binary up to `RestartOnCrash` times after a non-zero exit. Backoff is exponential (1 s, 2 s, 4 s, ... capped at `MaxRestartBackoff` — default 30 s). Context cancellation aborts further restarts.
+- **`agent_session_id` preservation.** When `Caps.ProviderSessionID = true` and a session ID has been observed via `EventSessionID` on a prior attempt, the most-recent ID is fed into the next spawn's `BuildArgs` in place of the original `SessionIDPreset`. Restart preserves the conversation rather than starting fresh.
+- **Watchdog** SIGKILLs immediately (no SIGTERM grace) when no activity within `WatchdogTimeout`. Uses `ActivityCallback` ticks when non-nil; falls back to ptmx I/O activity otherwise. `ExitError.Cause = "watchdog_kill"`. Not restart-eligible.
+- **`OnRestart`** fires after backoff completes and just before the new spawn. Receives the 1-indexed attempt number and the previous attempt's `*ExitError`.
+
+### Adapter-runtime path
+
+`StartOptions.Supervisor` and `StartOptions.ResourceLimits` are PTY-only in v0.6.0. On the adapter runtime (`Caps.PTY=false`), these fields are currently NOT consulted. Forwarding them to `runner.Config.Supervisor` / `.ResourceLimits` is blocked on `go-runner` publishing its v0.3.0 supervision API — the supervisor commits exist locally on the `feat/supervision-and-limits` branch but the `v0.3.0` tag points at a pre-supervision commit (`723606c`). Once go-runner ships a clean v0.3.x with supervision exported, the adapter-path forwarding is a small, additive follow-up.
+
+### Tests
+
+- New `pty_supervisor_test.go` — idle-kill, restart-on-crash (succeeds on attempt 2), restart-exhausted (3 spawns, cause `restart_exhausted`), watchdog (immediate SIGKILL), activity reset (periodic SendInput keeps idle-kill from firing), OnRestart-not-fired-on-idle-kill, Stop-during-supervised, CPUTime ResourceLimits (CPU-bound spinner under `ulimit -t 1`), MemoryMax linux-only smoke (skipped without `systemd-run --user`), backcompat (Supervisor=nil + ResourceLimits=nil preserves v0.5.0).
+- Race-clean: `go test -race -count=10 -run 'PTY.*Supervisor|PTYResource' ./agentsessions/` — flake-free across 10 stress runs.
+- All v0.5.0 tests pass unchanged on the supervised-disabled path. Compliance harness still green.
+
+### Known limitations
+
+- **macOS `MemoryMax` is silently dropped.** Same as `go-runner` v0.3.0 — `RLIMIT_AS` isn't exposed via bash's `ulimit -v` on darwin and `systemd-run` is linux-only. Hard memory caps on macOS require VM-based isolation (Lima / OrbStack).
+- **No process-tree termination via `Setpgid`.** Same pre-existing limitation as `go-runner` v0.3.0 — children of children may survive a SIGTERM/SIGKILL on the direct child. Documented; not addressed here.
+- **Cgroups v2 direct manipulation** (via `containerd/cgroups` or similar) is not used — we shell out via `systemd-run --user` only when available. Deferred per `go-runner` v0.3.0's same out-of-scope decision.
+
+### Out of scope (deferred)
+
+- **Adapter-path Supervisor/ResourceLimits forwarding.** Blocked on go-runner publishing v0.3.0's supervision API. v0.6.x increment.
+- **`events.Heartbeat` lib-side synthesis.** Adapter responsibility — the lib does not synthesize.
+- **Recovery broker integration** (nanite's D-SUBAGENT-RECOVERY-BROKER). App-internal pattern; the lib provides the supervision hooks (`OnRestart`, `ExitError.Cause`), the app builds the broker.
+- **Live-linux integration tests on a self-hosted runner.** Same as `go-runner` v0.3.0 — gap acknowledged here, not blocking.
+
 ## v0.5.0 — 2026-05-08
 
 Tier 3 of the portfolio agent-boot foundation: long-lived PTY runtime, AutoFireFirstTurn hook, two-dir model (Workdir + WorkspaceDir), capability-driven runtime selection, structured PID propagation across turn boundaries, and an attach-broker stability audit.
