@@ -2,6 +2,27 @@
 
 All notable changes to `go-agent-sessions` are documented in this file. Per-release notes are also published as GitHub Releases.
 
+## v0.7.0 — 2026-05-08
+
+`Manager.WaitSession` now propagates the underlying `Session.Wait` error verbatim. Supervised PTY terminations (`*ExitError` with `Cause = idle_timeout / watchdog_kill / restart_exhausted / oom_kill / resource_limit`) reach the consumer extractable via `errors.As`, so recovery brokers and post-mortem hooks can classify terminations without a side-channel.
+
+Authoritative implementer prompt + report: `agent-workspaces/execution/go-agent-sessions/2026-05-08-exit-error-propagation/`. Surfaced during clockwork CW-20260508-0002 review (`agent-workspaces/execution/clockwork-manifold/agentic-execution-flow/2026-05-08/implementer-report-agent-boot-tests.md`).
+
+### Behavior change
+
+- **`Manager.WaitSession(ctx, id) (int, error)` returns the underlying error from `Session.Wait` instead of always returning nil on terminal state.** Clean exits (code 0) still return `(0, nil)`. Supervised terminations return `*ExitError` (extract via `errors.As`); non-supervised non-zero exits return whatever `Session.Wait` produced (typically `*exec.ExitError` from go-runner). Existing callers that did `code, err := mgr.WaitSession(...); if err != nil { ... }` and treated `err != nil` as unexpected must update — those terminations were always errors at the `Session.Wait` layer; the lib was previously hiding them.
+
+### Implementation notes
+
+- `sessionResult` (unexported) gained an `exitErr error` field captured by the watch goroutine alongside `exitCode`. No new public types; only the `WaitSession` return value's error semantics change.
+- The internal `killing`-flag branch in `watch` (used to record state as `done` on caller-driven Stop) does not swallow `r.exitErr` — Stop-driven exits surface whatever `Session.Wait` returns. For the PTY runtime that's typically nil (kill-driven termination is "expected"); test `TestManager_WaitSession_StopDrivenTermination` documents this with the in-test fakeSession.
+
+### Tests
+
+- New `TestManager_WaitSession_PropagatesExitError` (in `manager_wait_session_pty_test.go`, `!windows` build tag) — supervised PTY session under `IdleKill: 300ms`; asserts `Manager.WaitSession` error `errors.As` to `*ExitError` with `Cause == CauseIdleTimeout`. Pattern adapts `TestPTYSupervisor_IdleKill_TerminatesIdleChild` to route through `Manager`.
+- Three fake-runtime cases in `manager_test.go`: clean-exit regression guard, non-zero-exit-no-supervisor (sentinel error round-trip; `errors.As(*ExitError) == false`), Stop-driven termination (killing-flag branch does not synthesize a spurious error).
+- All v0.6.0 supervisor tests pass unchanged. Race-clean: `go test -race -count=10 ./agentsessions/...` flake-free.
+
 ## v0.6.0 — 2026-05-08
 
 PTY supervision and OS-level resource limits land natively on the long-lived PTY runtime. The v0.5.0 deferred wiring is now implemented per the path the v0.5.0 implementer flagged: a PTY-native restart loop wrapping `cmd.Wait`, with idle-kill / watchdog goroutines observing ptmx I/O directly — no retrofit of `go-runner.Supervisor` (the impedance mismatch with `creack/pty.Start` is unchanged from the v0.5.0 analysis).
