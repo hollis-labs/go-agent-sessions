@@ -303,3 +303,78 @@ func TestManager_Health_CombinesHealthAndCaps(t *testing.T) {
 	}
 	rt.lastSession().complete(0)
 }
+
+func TestManager_WaitSession_CleanExit(t *testing.T) {
+	// Regression guard: a clean (code=0) Session.Wait must continue to
+	// return (0, nil) from WaitSession after the error-propagation change.
+	m := NewManager(&memSink{})
+	rt := newFakeRuntime("fake", "test")
+	if err := m.Start(context.Background(), StartRequest{
+		ID: "s-clean", Runtime: rt, Options: StartOptions{Workdir: t.TempDir()},
+	}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	rt.lastSession().complete(0)
+
+	code, waitErr := m.WaitSession(context.Background(), "s-clean")
+	if waitErr != nil {
+		t.Errorf("WaitSession err = %v, want nil for clean exit", waitErr)
+	}
+	if code != 0 {
+		t.Errorf("code = %d, want 0", code)
+	}
+}
+
+func TestManager_WaitSession_NonZeroExitNoSupervisor(t *testing.T) {
+	// A non-supervised session whose Session.Wait returned a non-nil error
+	// must surface the underlying error verbatim through WaitSession. The
+	// error must NOT errors.As to *ExitError because no supervision was in
+	// play — supervised classification is the only producer of *ExitError.
+	m := NewManager(&memSink{})
+	rt := newFakeRuntime("fake", "test")
+	if err := m.Start(context.Background(), StartRequest{
+		ID: "s-nonzero", Runtime: rt, Options: StartOptions{Workdir: t.TempDir()},
+	}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	sentinel := errors.New("non-zero exit from unsupervised runtime")
+	rt.lastSession().completeWithErr(1, sentinel)
+
+	code, waitErr := m.WaitSession(context.Background(), "s-nonzero")
+	if !errors.Is(waitErr, sentinel) {
+		t.Errorf("WaitSession err = %v, want %v (verbatim from Session.Wait)", waitErr, sentinel)
+	}
+	var xe *ExitError
+	if errors.As(waitErr, &xe) {
+		t.Errorf("errors.As(*ExitError) = true; non-supervised exits must not produce *ExitError")
+	}
+	if code != 1 {
+		t.Errorf("code = %d, want 1", code)
+	}
+}
+
+func TestManager_WaitSession_StopDrivenTermination(t *testing.T) {
+	// A caller-driven Stop sets entry.killing in watch(); verify the
+	// killing-flag branch does not swallow whatever Session.Wait produced.
+	// fakeSession's Stop closes done with code=-1 and waitErr unset (nil),
+	// modeling a clean kill — WaitSession must surface (-1, nil), not a
+	// synthetic error from the killing branch.
+	m := NewManager(&memSink{})
+	rt := newFakeRuntime("fake", "test")
+	if err := m.Start(context.Background(), StartRequest{
+		ID: "s-stop", Runtime: rt, Options: StartOptions{Workdir: t.TempDir()},
+	}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := m.Stop(context.Background(), "s-stop"); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+
+	code, waitErr := m.WaitSession(context.Background(), "s-stop")
+	if waitErr != nil {
+		t.Errorf("WaitSession err = %v, want nil (fakeSession Stop yields nil Wait err)", waitErr)
+	}
+	if code != -1 {
+		t.Errorf("code = %d, want -1 (killed)", code)
+	}
+}
