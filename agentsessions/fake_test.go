@@ -22,6 +22,11 @@ type fakeSession struct {
 	killed atomic.Bool
 	fanout io.Writer
 
+	// waitErr is the error fakeSession.Wait returns alongside code. Set
+	// under once.Do via completeWithErr; safe to read after <-done since
+	// the close is a happens-before barrier.
+	waitErr error
+
 	// inputSink, if non-nil, receives SendInput bytes.
 	inputSink io.Writer
 
@@ -37,7 +42,7 @@ func newFakeSession(pid int) *fakeSession {
 
 func (f *fakeSession) Wait() (int, error) {
 	<-f.done
-	return int(f.code.Load()), nil
+	return int(f.code.Load()), f.waitErr
 }
 
 func (f *fakeSession) Stop(_ context.Context) error {
@@ -82,6 +87,18 @@ func (f *fakeSession) CheckpointHints() (CheckpointHint, bool) {
 func (f *fakeSession) complete(code int) {
 	f.once.Do(func() {
 		f.code.Store(int32(code))
+		close(f.done)
+	})
+}
+
+// completeWithErr is complete that also stages an error for Wait to
+// return. Used to drive WaitSession's error-propagation paths from
+// tests; mirrors what go-runner / supervised PTY return on non-clean
+// exits (e.g. *exec.ExitError, *ExitError).
+func (f *fakeSession) completeWithErr(code int, err error) {
+	f.once.Do(func() {
+		f.code.Store(int32(code))
+		f.waitErr = err
 		close(f.done)
 	})
 }
