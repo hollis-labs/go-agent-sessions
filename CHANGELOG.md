@@ -4,7 +4,7 @@ All notable changes to `go-agent-sessions` are documented in this file. Per-rele
 
 ## v0.7.0 — 2026-05-08
 
-`Manager.WaitSession` now propagates the underlying `Session.Wait` error verbatim. Supervised PTY terminations (`*ExitError` with `Cause = idle_timeout / watchdog_kill / restart_exhausted / oom_kill / resource_limit`) reach the consumer extractable via `errors.As`, so recovery brokers and post-mortem hooks can classify terminations without a side-channel.
+`Manager.WaitSession` now propagates the underlying `Session.Wait` error verbatim. Supervised PTY non-clean exits surface as `*ExitError` (extractable via `errors.As`); when the supervisor itself triggered the kill, `ExitError.Cause` classifies the termination as `idle_timeout / watchdog_kill / restart_exhausted / oom_kill / resource_limit`. For ordinary non-zero exits or Stop/ctx-cancel under supervision, `*ExitError` is still returned but `Cause` is empty (the supervisor didn't drive the termination). Recovery brokers and post-mortem hooks can classify terminations without a side-channel.
 
 Authoritative implementer prompt + report: `agent-workspaces/execution/go-agent-sessions/2026-05-08-exit-error-propagation/`. Surfaced during clockwork CW-20260508-0002 review (`agent-workspaces/execution/clockwork-manifold/agentic-execution-flow/2026-05-08/implementer-report-agent-boot-tests.md`).
 
@@ -15,7 +15,7 @@ Authoritative implementer prompt + report: `agent-workspaces/execution/go-agent-
 ### Implementation notes
 
 - `sessionResult` (unexported) gained an `exitErr error` field captured by the watch goroutine alongside `exitCode`. No new public types; only the `WaitSession` return value's error semantics change.
-- The internal `killing`-flag branch in `watch` (used to record state as `done` on caller-driven Stop) does not swallow `r.exitErr` — Stop-driven exits surface whatever `Session.Wait` returns. For the PTY runtime that's typically nil (kill-driven termination is "expected"); test `TestManager_WaitSession_StopDrivenTermination` documents this with the in-test fakeSession.
+- The internal `killing`-flag branch in `watch` (used to record state as `done` on caller-driven Stop) does not swallow `r.exitErr` — Stop-driven exits surface whatever `Session.Wait` returns. For the supervised PTY runtime that may be `nil` or a non-nil `*ExitError` with empty `Cause`, depending on how the child responds to SIGTERM (an exit that satisfies `cmd.Wait()` cleanly produces nil; one that returns a non-zero/signal exit produces `*ExitError` with `Cause == ""`). Existing `pty_supervisor_test.go::TestPTYSupervisor_StopWithRestartZero_NotMisclassifiedAsExhausted` accepts both shapes; consumers handling Stop must too. The new `TestManager_WaitSession_StopDrivenTermination` documents the in-test fakeSession's specific (-1, nil) shape.
 
 ### Tests
 

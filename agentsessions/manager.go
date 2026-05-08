@@ -488,12 +488,20 @@ func (m *Manager) AttachWith(ctx context.Context, id string, w io.Writer, opts A
 // was never registered.
 //
 // The returned error is the verbatim Session.Wait return value:
-//   - nil for clean exits (code == 0 with no supervisor cause).
-//   - *ExitError (extractable via errors.As) when supervision triggered
-//     the termination — Cause classifies as idle_timeout, watchdog_kill,
-//     restart_exhausted, oom_kill, or resource_limit.
+//   - nil for clean exits (code == 0 with no underlying wait error).
+//   - *ExitError (extractable via errors.As) for any non-clean exit
+//     under PTY supervision. ExitError.Cause classifies
+//     supervisor-triggered kills as idle_timeout, watchdog_kill,
+//     restart_exhausted, oom_kill, or resource_limit; Cause is empty
+//     for ordinary non-zero exits or Stop/ctx-cancel under supervision
+//     (the supervisor did not trigger the termination, so it carries
+//     no cause label even though *ExitError is still returned).
 //   - The underlying wait error (typically *exec.ExitError) for non-zero
 //     exits on non-supervised sessions.
+//
+// Consumers classifying terminations should errors.As(err, &xe) first;
+// branch on xe.Cause when non-empty, fall through to *exec.ExitError or
+// other underlying-error checks otherwise. Never .Error() string-match.
 //
 // Behavior change vs. earlier versions: WaitSession previously discarded
 // Session.Wait's error and always returned nil on terminal state.
