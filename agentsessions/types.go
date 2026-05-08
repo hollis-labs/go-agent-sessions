@@ -286,6 +286,48 @@ type StartOptions struct {
 	// io.Writer's Write — keep the work short or hand off to your own
 	// goroutine. Default nil disables the surface; nothing is allocated.
 	TypedEventCallback provider.EventsCallback
+
+	// Supervisor, when non-nil, enables process supervision: idle-kill,
+	// restart-on-crash, and watchdog. See SupervisorOptions godoc. Nil
+	// preserves v0.5.0 default "spawn once, run to completion" behavior.
+	//
+	// v0.6.0 scope: PTY runtime (Caps.PTY=true) only. Supervision is
+	// implemented natively — idle-kill / watchdog goroutines observe
+	// ptmx I/O and a per-attempt cmd.Wait; the restart loop wraps the
+	// wait. Restart preserves the provider-side agent_session_id when
+	// Caps.ProviderSessionID is true (the most-recent observed session
+	// ID is fed into the next spawn's BuildArgs in place of
+	// SessionIDPreset).
+	//
+	// On the adapter runtime (Caps.PTY=false), this field is currently
+	// NOT consulted — adapter-path forwarding to go-runner is blocked on
+	// go-runner publishing its v0.3.0 supervision API (which exists
+	// locally but isn't in the published module). Tracked as a v0.6.x
+	// follow-up. Setting Supervisor with Caps.PTY=false has no effect.
+	//
+	// Added in v0.6.0.
+	Supervisor *SupervisorOptions
+
+	// ResourceLimits, when non-nil and non-zero, applies OS-level resource
+	// caps to spawned children (CPU time, virtual memory, open files,
+	// processes, file size). Wraps the spawn argv with
+	// `sh -c "ulimit ...; exec ..."` and, on Linux when systemd-run --user
+	// is available, layers `systemd-run --scope --property=MemoryMax=...`.
+	//
+	// v0.6.0 scope: PTY runtime (Caps.PTY=true) only. The wrap composes
+	// with sandbox.Apply — limits inherit through the sandbox-exec →
+	// real binary chain.
+	//
+	// On the adapter runtime (Caps.PTY=false), this field is currently
+	// NOT consulted — see the Supervisor godoc above for the same
+	// follow-up note.
+	//
+	// macOS caveat: MemoryMax is silently dropped (RLIMIT_AS unavailable
+	// via bash's ulimit -v on darwin and systemd-run is linux-only).
+	// Callers needing hard memory limits on macOS use VM-based isolation.
+	//
+	// Added in v0.6.0.
+	ResourceLimits *ResourceLimits
 }
 
 // Runtime is the high-level contract a session-spawner satisfies. It
