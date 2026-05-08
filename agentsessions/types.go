@@ -113,6 +113,29 @@ type SessionIDer interface {
 	ProviderSessionID() string
 }
 
+// PIDReporter is an optional Session extension that distinguishes the PID
+// of a process currently running from the most-recently-started process.
+// The two diverge for subprocess-per-turn runtimes: between turns no
+// process is running, so LivePID returns 0; LastPID still surfaces the
+// PID of the most-recent turn for log-correlation purposes.
+//
+// PTY runtimes implement this trivially — both return the long-lived
+// child PID across the session's lifetime.
+//
+// Callers type-assert to this interface; it is not part of the core
+// Session contract. Health().PID returns LivePID when the runtime
+// implements this interface; otherwise it returns whatever the runtime
+// provides (typically the legacy "PID-or-zero" semantics).
+type PIDReporter interface {
+	// LivePID returns the PID of the running process, or 0 when no
+	// process is currently running.
+	LivePID() int
+
+	// LastPID returns the PID of the most-recently-started process, or
+	// 0 if no process has started yet on this Session.
+	LastPID() int
+}
+
 // StartOptions bundles the runtime-agnostic state a Runtime needs to
 // spawn a Session. Fanout, when non-nil, receives a copy of the session's
 // output stream so the Manager can broadcast to attach subscribers — CLI
@@ -124,8 +147,24 @@ type StartOptions struct {
 	// directory and as the workspace argument to sandbox.Apply.
 	Workdir string
 
+	// WorkspaceDir is the per-session persistent root for the lib's own
+	// state — distinct from Workdir (the spawned process's cwd). When
+	// non-empty, the PTY runtime falls back to <WorkspaceDir>/logs/session.log
+	// for its log file when LogPath is empty. The lib never writes to
+	// WorkspaceDir except on the explicit LogPath fallback path; any other
+	// state (checkpoints, plan capture) is consumer-owned.
+	//
+	// Zero-value preserves existing behavior: the PTY runtime requires
+	// LogPath in that case, and the adapter runtime ignores this field
+	// entirely. See README "Two-dir model" for the layered Workdir/
+	// WorkspaceDir convention adopted across the agent-boot portfolio.
+	WorkspaceDir string
+
 	// LogPath is the absolute path of the per-session log file the
-	// adapter writes to. Optional.
+	// adapter writes to. Optional. For the PTY runtime, if LogPath is
+	// empty and WorkspaceDir is set, the runtime falls back to
+	// <WorkspaceDir>/logs/session.log. If both are empty, the PTY runtime
+	// returns an error from Start.
 	LogPath string
 
 	// BootPrompt is the initial system / boot prompt the adapter feeds
@@ -202,6 +241,51 @@ type StartOptions struct {
 	// SubscriberDepth overrides the attach-broker subscriber channel
 	// depth. Zero uses the Manager default (64 chunks).
 	SubscriberDepth int
+
+	// AutoFireFirstTurn, when true, instructs the runtime to deliver
+	// FirstTurnPayload as the first SendInput automatically after Start
+	// succeeds. Eliminates the Launch/SendInput race that bit consumers
+	// previously (e.g. clockwork CW-20260507-0011) — Start does not return
+	// until the payload has been delivered to the input channel.
+	//
+	// For PTY runtimes with BootMode == "stdin" and a non-empty BootPrompt,
+	// this is a no-op (the boot prompt is already written to ptmx during
+	// Start, so the kickoff is in flight before this hook would fire).
+	//
+	// Default false preserves existing behavior; the caller is responsible
+	// for the first SendInput when this is unset.
+	AutoFireFirstTurn bool
+
+	// FirstTurnPayload is the bytes sent on the auto-fired first turn when
+	// AutoFireFirstTurn is true. Typically the kickoff string (e.g.
+	// "Boot @./boot.md") or the first user message. Ignored when
+	// AutoFireFirstTurn is false.
+	FirstTurnPayload []byte
+
+	// TypedEventCallback, when non-nil, receives parsed typed events
+	// (provider/events.Event) from the runtime. Mirrors the existing
+	// EventFanout chan<- provider.StreamEvent surface but uses go-providers
+	// Tier-2 typed events: callers see events.Delta / events.ToolUse /
+	// events.ToolResult / events.SubagentSpawn / events.SessionID /
+	// events.Done / events.Error / events.Heartbeat / events.Thinking.
+	//
+	// v0.4.0 scope:
+	//   - PTY runtime (Caps.PTY=true): the callback fires per-line from the
+	//     reader goroutine, ONLY when the adapter implements the optional
+	//     provider.EventParser interface. Adapters without EventParser
+	//     produce no typed events through this callback (no fallback
+	//     translation in v0.4.0; the legacy EventFanout surface still
+	//     receives ParseLine output).
+	//   - Adapter runtime (Caps.PTY=false, subprocess-per-turn): this field
+	//     is currently NOT consulted. The adapter runtime drives runner.Run
+	//     which surfaces provider events as runner.EventProviderEvent
+	//     (StreamEvent shape). Typed events on the adapter path is v0.5.0+
+	//     work — see CHANGELOG and the implementer report's "Out of scope".
+	//
+	// Sends are synchronous; treat the callback the way you'd treat an
+	// io.Writer's Write — keep the work short or hand off to your own
+	// goroutine. Default nil disables the surface; nothing is allocated.
+	TypedEventCallback provider.EventsCallback
 }
 
 // Runtime is the high-level contract a session-spawner satisfies. It

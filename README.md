@@ -17,6 +17,123 @@ go get github.com/hollis-labs/go-agent-sessions
 
 ## Usage
 
+### Long-lived PTY runtime (Caps.PTY = true)
+
+For adapters whose CLI persists conversation / MCP / tool-affordance state in
+a long-lived child process, set `Caps.PTY = true` on the
+`AdapterRuntimeConfig` and `NewFromAdapter` returns a PTY-backed runtime
+instead of the subprocess-per-turn runtime. The Manager surface stays
+identical — both shapes implement the same `Session` interface.
+
+```go
+rt, err := agentsessions.NewFromAdapter(agentsessions.AdapterRuntimeConfig{
+    ID:      "claude-code-pty",
+    Kind:    "cli",
+    Adapter: provider.NewClaudeAdapter(),
+    Caps: agentsessions.Capabilities{
+        PTY:            true,    // selects ptyRuntime
+        Resize:         true,    // PTY resize works
+        BinaryRequired: true,
+    },
+})
+
+sess, err := rt.Start(ctx, agentsessions.StartOptions{
+    Workdir:      bootDir,             // agent's cwd (per-task tempdir)
+    WorkspaceDir: workspaceDir,        // lib's persistent state root
+    BootMode:     "stdin",             // optional — write BootPrompt to ptmx at Start
+    BootPrompt:   "Boot @./boot.md\n", // optional kickoff via stdin
+})
+```
+
+Behavior:
+
+- The CLI is spawned once at `Start` time under a `creack/pty` master and
+  stays alive across turns. `SendInput` writes bytes to the PTY master.
+- The reader goroutine scans line-delimited output, tees raw bytes to the
+  log file + caller's `Fanout`, parses legacy `provider.StreamEvent` for
+  `EventFanout`, and (when the adapter implements `provider.EventParser`)
+  fires typed events to `TypedEventCallback`.
+- `Wait` blocks until the child exits; the wait goroutine nil-clears the
+  ptmx pointer under a write lock so any in-flight `SendInput` /
+  `Resize` returns `ErrNoInputChannel` cleanly rather than racing against
+  fd close.
+- `Stop` issues SIGTERM, waits up to 5 seconds, then SIGKILL.
+- `Resize` is supported when `Caps.Resize == true` (full-screen TUI agents
+  redraw on SIGWINCH).
+
+PTY merges stderr into stdout at the kernel level — there is no separable
+stderr stream. Consumers needing stderr separation should use the
+subprocess-per-turn adapter runtime instead.
+
+### Two-dir model — Workdir vs WorkspaceDir
+
+The PTY runtime distinguishes the agent's cwd from the lib's persistent
+state root (matches the cross-app agent-boot convention):
+
+| Concern | Field | Lifetime |
+|---|---|---|
+| Spawned process's cwd + planted config | `StartOptions.Workdir` | Per task; cleaned by consumer |
+| Lib's logs (and future state, checkpoints) | `StartOptions.WorkspaceDir` | Persistent; survives boot dir cleanup |
+
+When `LogPath` is set, it overrides the WorkspaceDir-derived default. When
+`LogPath` is empty, the PTY runtime falls back to
+`<WorkspaceDir>/logs/session.log`. The PTY runtime requires one of the two
+to be set; otherwise `Start` returns an error.
+
+The adapter runtime ignores `WorkspaceDir` (forward-compat — it doesn't
+manage its own log file).
+
+### AutoFireFirstTurn
+
+Set `StartOptions.AutoFireFirstTurn = true` and provide
+`StartOptions.FirstTurnPayload` to have the runtime deliver the kickoff
+input automatically as part of `Start`. Subprocess-per-turn semantics
+deliver synchronously (Start blocks until the first turn completes); PTY
+delivers via a single ptmx write before Start returns.
+
+```go
+sess, err := rt.Start(ctx, agentsessions.StartOptions{
+    Workdir:           bootDir,
+    AutoFireFirstTurn: true,
+    FirstTurnPayload:  []byte("Boot @./boot.md"),
+})
+```
+
+Eliminates the Launch/SendInput race that bit consumers previously
+(clockwork CW-20260507-0011). When `BootMode == "stdin"` and `BootPrompt`
+is non-empty, AutoFireFirstTurn is a no-op for the PTY runtime — the
+boot prompt was already written to ptmx during Start.
+
+### Typed event callback
+
+`StartOptions.TypedEventCallback` mirrors the existing
+`EventFanout chan<- provider.StreamEvent` surface but uses go-providers
+Tier-2 typed events (`events.Delta`, `events.ToolUse`, `events.ToolResult`,
+`events.SubagentSpawn`, etc.):
+
+```go
+sess, err := rt.Start(ctx, agentsessions.StartOptions{
+    Workdir: bootDir,
+    LogPath: logPath,
+    TypedEventCallback: func(ev events.Event) {
+        switch e := ev.(type) {
+        case events.Delta:
+            render(e.Text)
+        case events.ToolUse:
+            showTool(e.Name, e.Args)
+        case events.SubagentSpawn:
+            recordSubagent(e)
+        }
+    },
+})
+```
+
+The callback fires from the parser goroutine — keep the work short or
+hand off to your own goroutine. Default nil disables the surface.
+Today this is wired only on the PTY runtime (via the adapter's optional
+`provider.EventParser` interface); the adapter runtime continues to fire
+legacy `StreamEvent` via `EventFanout`.
+
 ### Adapter-driven Session (per-turn subprocess)
 
 ```go
@@ -136,6 +253,31 @@ m.Start(ctx, agentsessions.StartRequest{
 Nil leaves runner-level stderr handling at its default (`cmd.Stderr`
 unset → `os/exec` routes to `os.DevNull`). The provider-driven runtime
 ignores this field — there is no spawned subprocess to wire stderr to.
+
+### Attach broker — `since_seq` resume
+
+`Manager.Attach` / `Manager.AttachWith` multiplex one session's output
+stream to many concurrent subscribers via an in-memory ring buffer (drop-
+oldest) plus per-subscriber drop-on-slow channels. Subscribers can resume
+after a transient disconnect by passing `AttachOptions.SinceSeq`:
+
+```go
+// Initial attach — replays the ring then streams live output.
+go m.Attach(ctx, sessionID, w)
+
+// After disconnect at byte N, resume with no duplication or gap:
+go m.AttachWith(ctx, sessionID, w, agentsessions.AttachOptions{
+    SinceSeq: lastSeenBytes,
+})
+```
+
+Round-trip semantics: `SinceSeq=N` yields exactly bytes `N+1..head` in the
+ring; if `SinceSeq` points before the ring's start (history evicted), the
+full ring is replayed and the gap between `SinceSeq` and `ringStart` is
+silently lost — callers detect this by comparing expected vs received byte
+counts. Frozen surface as of v0.4.0; ring/depth tunable via
+`StartOptions.RingBytes` and `StartOptions.SubscriberDepth`. See `attach.go`
+package doc for the full drop-policy + lifecycle contract.
 
 ### Compose with go-egress-proxy
 

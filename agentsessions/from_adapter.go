@@ -42,14 +42,33 @@ type AdapterRuntimeConfig struct {
 	WaitDelay time.Duration
 }
 
-// NewFromAdapter constructs a Runtime backed by cfg.Adapter. Sessions
-// produced by Start drive runner.Run per turn.
+// NewFromAdapter constructs a Runtime backed by cfg.Adapter. Runtime
+// shape is selected by cfg.Caps.PTY:
 //
-// Single-turn-in-flight semantics: a second SendInput while a turn is
-// running returns ErrTurnInFlight without queueing.
+//   - cfg.Caps.PTY == false (default): subprocess-per-turn runtime.
+//     Each SendInput drives a fresh runner.Run that invokes the underlying
+//     CLI binary; a turn ends when the runner emits EventProcessExited.
+//     Single-turn-in-flight semantics — a second SendInput while a turn is
+//     running returns ErrTurnInFlight without queueing.
 //
-// Caps().BinaryRequired is honored — Prepare returns an error if the
-// adapter's Detect() finds no binary.
+//   - cfg.Caps.PTY == true: long-lived PTY runtime. The adapter binary is
+//     spawned once at Start time under a creack/pty master; SendInput writes
+//     bytes to the PTY master. Conversation / MCP / tool-affordance state
+//     persists across turns inside the long-lived child. Resize works.
+//     SendInput is non-blocking; the consumer is responsible for any
+//     turn-boundary discipline at the application layer (the lib does not
+//     impose ErrTurnInFlight on PTY because turn boundaries on a PTY are
+//     CLI-defined, not lib-defined).
+//
+// Caps().BinaryRequired is honored on both shapes — Prepare returns an
+// error if the adapter's Detect() finds no binary.
+//
+// Capability-driven selection means consumers do not pick a constructor;
+// they declare what their adapter supports via Caps and the lib routes to
+// the right implementation. The acceptance contract is that flipping
+// cfg.Caps.PTY does not silently change other observable behavior beyond
+// the lifecycle shape (existing adapters with Caps.PTY=false are
+// unaffected).
 func NewFromAdapter(cfg AdapterRuntimeConfig) (Runtime, error) {
 	if cfg.ID == "" {
 		return nil, errors.New("agentsessions: AdapterRuntimeConfig.ID is required")
@@ -59,6 +78,9 @@ func NewFromAdapter(cfg AdapterRuntimeConfig) (Runtime, error) {
 	}
 	if cfg.Kind == "" {
 		cfg.Kind = "cli"
+	}
+	if cfg.Caps.PTY {
+		return &ptyRuntime{cfg: cfg}, nil
 	}
 	return &adapterRuntime{cfg: cfg}, nil
 }
@@ -101,6 +123,19 @@ func (r *adapterRuntime) Start(ctx context.Context, opts StartOptions) (Session,
 			return r.cfg.Adapter.BuildArgs(prompt, "", sessionID)
 		}
 	}
+
+	if opts.AutoFireFirstTurn && len(opts.FirstTurnPayload) > 0 {
+		// Synchronous first turn: subprocess-per-turn semantics mean the
+		// runner.Run completes before SendInput returns. Start blocks until
+		// the kickoff turn finishes — eliminates the Launch/SendInput race
+		// (CW-20260507-0011) at the cost of a longer Start. Consumers that
+		// don't want this latency leave AutoFireFirstTurn=false and call
+		// SendInput on their own schedule.
+		if err := s.SendInput(ctx, opts.FirstTurnPayload); err != nil {
+			_ = s.Stop(ctx)
+			return nil, fmt.Errorf("agentsessions: auto-fire first turn: %w", err)
+		}
+	}
 	return s, nil
 }
 
@@ -115,10 +150,11 @@ type adapterSession struct {
 
 	sessionID atomic.Value // string — last observed provider session_id
 
-	state  atomic.Int32 // LiveState
-	alive  atomic.Bool
-	pid    atomic.Int32
-	turnID atomic.Value // string
+	state   atomic.Int32 // LiveState
+	alive   atomic.Bool
+	pid     atomic.Int32 // live PID — resets to 0 between turns
+	lastPID atomic.Int32 // sticky most-recent PID — survives turn boundaries
+	turnID  atomic.Value // string
 
 	stopCh   chan struct{}
 	stopOnce sync.Once
@@ -213,6 +249,7 @@ func (s *adapterSession) handleRunnerEvent(ev runner.Event) {
 	case runner.EventProcessStarted:
 		if pid, ok := ev.Payload["pid"].(int); ok {
 			s.pid.Store(int32(pid))
+			s.lastPID.Store(int32(pid))
 		}
 	case runner.EventProviderEvent:
 		if pe, ok := ev.Payload["event"].(provider.StreamEvent); ok {
@@ -269,6 +306,16 @@ func (s *adapterSession) ProviderSessionID() string {
 	id, _ := s.sessionID.Load().(string)
 	return id
 }
+
+// LivePID — PIDReporter. Subprocess-per-turn semantics: 0 between turns,
+// non-zero only while a turn's runner.Run is active.
+func (s *adapterSession) LivePID() int { return int(s.pid.Load()) }
+
+// LastPID — PIDReporter. Sticky most-recent PID across turn boundaries;
+// useful for log correlation post-exit.
+func (s *adapterSession) LastPID() int { return int(s.lastPID.Load()) }
+
+var _ PIDReporter = (*adapterSession)(nil)
 
 // encodeStreamEvent renders ev for the attach broker. Plain-text
 // EventDelta is forwarded as-is; everything else is rendered as a short
