@@ -232,6 +232,12 @@ func (s *adapterSession) SendInput(ctx context.Context, data []byte) error {
 		WaitDelay:  s.runtime.cfg.WaitDelay,
 		OnEvent:    s.handleRunnerEvent,
 	}
+	// StartOptions.Supervisor + ResourceLimits are PTY-only in v0.6.0.
+	// Forwarding them to runner.Config.Supervisor / .ResourceLimits is
+	// blocked on go-runner publishing its v0.3.0 supervision API (the
+	// supervisor commits exist locally but are not in the published
+	// module). Tracked as a v0.6.x follow-up — see CHANGELOG and the
+	// implementer report's "Out of scope".
 	err := runner.Run(runCtx, cfg)
 	if err != nil {
 		s.exitCode.Store(1)

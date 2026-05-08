@@ -30,6 +30,11 @@ import (
 // so in-flight writes can return ErrNoInputChannel cleanly rather than
 // racing against fd close.
 //
+// When StartOptions.Supervisor is non-nil, the runtime adds idle-kill,
+// restart-on-crash, and watchdog policies natively against the PTY child —
+// no go-runner involvement on this path. Restart preserves the provider-
+// side agent_session_id when Caps.ProviderSessionID is true.
+//
 // Pattern lifted from agent-mux/internal/provider/cli/claudecode/runtime.go
 // + agent-mux/internal/session/runtime.go (RWMutex + wait + lifecycle),
 // generalized: any provider.CLIAdapter that opts in via Caps.PTY=true gets
@@ -57,107 +62,55 @@ func (r *ptyRuntime) Start(ctx context.Context, opts StartOptions) (Session, err
 	if opts.Workdir == "" {
 		return nil, errors.New("agentsessions: StartOptions.Workdir is required for pty runtime")
 	}
-	binary, ok := r.cfg.Adapter.Detect()
-	if !ok {
-		return nil, fmt.Errorf("agentsessions: adapter %q binary not found", r.cfg.Adapter.Name())
-	}
 
 	logPath, err := resolvePTYLogPath(opts)
 	if err != nil {
 		return nil, err
 	}
-
-	// Args: long-lived PTY spawns once. Empty prompt slot; the boot prompt is
-	// delivered through exactly one channel — either stdin (BootMode == "stdin",
-	// in which case BuildArgs receives an empty system prompt to avoid double
-	// injection) or the adapter's argv-supplied system prompt (any other
-	// BootMode, in which case BuildArgs receives opts.BootPrompt). Per-turn
-	// prompts arrive via SendInput regardless.
-	systemPrompt := opts.BootPrompt
-	if opts.BootMode == "stdin" {
-		systemPrompt = ""
-	}
-	args := r.cfg.Adapter.BuildArgs("", systemPrompt, opts.SessionIDPreset)
-
-	cmd := exec.Command(binary, args...) //nolint:gosec // G204: adapter-sourced binary + args
-	cmd.Dir = opts.Workdir
-	if len(opts.Env) > 0 {
-		cmd.Env = opts.Env
-	} else {
-		cmd.Env = os.Environ()
-	}
-	if len(opts.ExtraFiles) > 0 {
-		cmd.ExtraFiles = opts.ExtraFiles
-	}
-
-	var sandboxCleanup func()
-	if opts.Profile.ID != "" {
-		cleanup, err := sandbox.Apply(cmd, opts.Profile, opts.Workdir)
-		if err != nil {
-			return nil, fmt.Errorf("agentsessions: sandbox apply: %w", err)
-		}
-		sandboxCleanup = cleanup
-	}
-
 	logF, err := os.Create(logPath) //nolint:gosec // G304: workspace-managed path
 	if err != nil {
-		if sandboxCleanup != nil {
-			sandboxCleanup()
-		}
 		return nil, fmt.Errorf("agentsessions: open log: %w", err)
 	}
 
-	ptmx, err := pty.Start(cmd)
-	if err != nil {
-		_ = logF.Close()
-		if sandboxCleanup != nil {
-			sandboxCleanup()
-		}
-		return nil, fmt.Errorf("agentsessions: pty start: %w", err)
-	}
-
 	s := &ptySession{
-		runtime:        r,
-		opts:           opts,
-		cmd:            cmd,
-		ptmx:           ptmx,
-		logFile:        logF,
-		sandboxCleanup: sandboxCleanup,
-		done:           make(chan error, 1),
-		copyDone:       make(chan struct{}),
+		runtime:       r,
+		opts:          opts,
+		logFile:       logF,
+		done:          make(chan error, 1),
+		copyDone:      make(chan struct{}),
+		stopRequested: make(chan struct{}),
 	}
 	s.alive.Store(true)
 	s.state.Store(int32(LiveStateIdle))
-	if cmd.Process != nil {
-		s.startedPID.Store(int32(cmd.Process.Pid))
-		s.lastPID.Store(int32(cmd.Process.Pid))
+
+	// First spawn happens synchronously so that BootMode=stdin writes and
+	// AutoFireFirstTurn delivery resolve before Start returns.
+	cmd, ptmx, attemptCleanup, err := s.spawnAttempt(0)
+	if err != nil {
+		_ = logF.Close()
+		return nil, err
 	}
 
-	if opts.BootMode == "stdin" && opts.BootPrompt != "" {
-		if _, werr := io.WriteString(ptmx, opts.BootPrompt); werr != nil {
-			// Reap the child to avoid a zombie — pty.Start succeeded so cmd
-			// owns a live process. Kill + Wait is the minimal-cleanup pair;
-			// errors from either are not actionable here.
-			_ = cmd.Process.Kill()
-			_ = cmd.Wait()
-			_ = ptmx.Close()
-			_ = logF.Close()
-			if sandboxCleanup != nil {
-				sandboxCleanup()
-			}
-			return nil, fmt.Errorf("agentsessions: write boot prompt: %w", werr)
-		}
+	if opts.Supervisor == nil {
+		// v0.5.0 single-shot lifecycle — preserved exactly. The legacy
+		// spawnReader / spawnWaiter pair captures the local ptmx and
+		// nil-clears the struct field at exit; no restart, no idle-kill,
+		// no watchdog.
+		s.legacyCleanup = attemptCleanup
+		s.spawnReaderLegacy(ptmx)
+		s.spawnWaiterLegacy(ptmx, cmd)
+	} else {
+		// Supervised lifecycle: a per-attempt reader + waiter + supervisor
+		// goroutines, plus the restart loop. The first attempt is already
+		// spawned above; runSupervised assumes ownership of the lifecycle
+		// from here. logFile + sandbox/limit cleanups for the first
+		// attempt are owned by runSupervised.
+		go s.runSupervised(ctx, cmd, ptmx, attemptCleanup)
 	}
-
-	// Reader and waiter both close over the local ptmx — this avoids a
-	// race between the reader reading s.ptmx and the waiter nil-clearing
-	// it. The struct field exists only so SendInput/Resize (which take the
-	// ptmxLock) can detect "the wait goroutine has cleared this fd."
-	s.spawnReader(ptmx)
-	s.spawnWaiter(ptmx)
 
 	if opts.AutoFireFirstTurn && len(opts.FirstTurnPayload) > 0 {
-		// Skip when the boot-prompt-on-stdin convention already wrote a kickoff.
+		// Skip when the boot-prompt-on-stdin convention already wrote a
+		// kickoff into the PTY during spawnAttempt(0).
 		if !(opts.BootMode == "stdin" && opts.BootPrompt != "") {
 			if err := s.SendInput(ctx, opts.FirstTurnPayload); err != nil {
 				_ = s.Stop(ctx)
@@ -188,12 +141,21 @@ func resolvePTYLogPath(opts StartOptions) (string, error) {
 
 // ptySession is the long-lived PTY-backed Session implementation.
 type ptySession struct {
-	runtime        *ptyRuntime
-	opts           StartOptions
-	cmd            *exec.Cmd
-	ptmx           *os.File
-	logFile        *os.File
-	sandboxCleanup func()
+	runtime *ptyRuntime
+	opts    StartOptions
+
+	// cmd / ptmx are the CURRENT attempt's process + master fd. On the
+	// supervised path they are replaced each restart. SendInput / Resize
+	// take ptmxLock and consult these directly.
+	cmd     *exec.Cmd
+	ptmx    *os.File
+	logFile *os.File
+
+	// legacyCleanup is the sandbox/limits cleanup for the v0.5.0 single-
+	// shot path. Run by the legacy waiter goroutine after cmd.Wait. nil
+	// on the supervised path (where runSupervised owns per-attempt
+	// cleanups directly).
+	legacyCleanup func()
 
 	// ptmxLock serializes SendInput / Resize against (a) each other and
 	// (b) the wait goroutine's pointer-clear + Close pair. Exclusive
@@ -203,14 +165,25 @@ type ptySession struct {
 	// enough to guarantee atomic per-input writes for arbitrary payloads.
 	//
 	// The reader goroutine captures the ptmx local at spawn and does not
-	// take this lock at all (see spawnReader). Only writers + the
-	// destroyer touch this mutex.
+	// take this lock at all (see spawnReaderLegacy / runReaderAttempt).
+	// Only writers + the destroyer touch this mutex.
 	ptmxLock sync.Mutex
 
 	state      atomic.Int32 // LiveState
 	alive      atomic.Bool
 	startedPID atomic.Int32 // PID at first start; stable across the session
 	lastPID    atomic.Int32 // PID of most-recent process (== startedPID for PTY)
+
+	// lastSessionID stores the most-recently observed provider session ID
+	// from EventSessionID. Used by the supervised restart path to feed
+	// the next BuildArgs's session-resume slot when Caps.ProviderSessionID
+	// is true. Always tracked; only consulted on restart.
+	lastSessionID atomic.Value // string
+
+	// activity tracks the most recent ptmx I/O timestamp for idle-kill
+	// and the watchdog fallback. Ticks happen unconditionally on Read/
+	// Write; the supervisor goroutines are the only consumers.
+	activity activityTracker
 
 	done     chan error
 	waitOnce sync.Once
@@ -219,80 +192,195 @@ type ptySession struct {
 
 	copyDone chan struct{}
 
-	stopOnce           sync.Once
-	sandboxCleanupOnce sync.Once
+	stopOnce      sync.Once
+	stopRequested chan struct{}
 }
 
-// spawnReader runs the PTY-master read goroutine: scans line-delimited
-// output, tees raw bytes to logFile + StartOptions.Fanout, and (when the
-// adapter parses) fans events out to EventFanout + TypedEventCallback.
-//
-// PTY merges stderr into stdout at the kernel level — there is no separate
-// stderr stream to capture (consumers needing stderr separation should use
-// the subprocess-per-turn adapter runtime instead).
-func (s *ptySession) spawnReader(ptmx *os.File) {
+// spawnAttempt creates a fresh PTY child for attempt N (0-indexed). On
+// success, sets s.cmd / s.ptmx (under ptmxLock), updates startedPID /
+// lastPID, and writes the boot prompt on attempt 0 when BootMode=stdin.
+// Returns the cmd + ptmx locals (so callers can capture them) and a
+// cleanup func to invoke after cmd.Wait completes.
+func (s *ptySession) spawnAttempt(attempt int) (*exec.Cmd, *os.File, func(), error) {
+	binary, ok := s.runtime.cfg.Adapter.Detect()
+	if !ok {
+		return nil, nil, nil, fmt.Errorf("agentsessions: adapter %q binary not found", s.runtime.cfg.Adapter.Name())
+	}
+
+	// Boot prompt is delivered through exactly one channel — either stdin
+	// (BootMode == "stdin", in which case BuildArgs receives an empty
+	// system prompt to avoid double injection) or the adapter's argv-
+	// supplied system prompt. Per-turn prompts arrive via SendInput.
+	systemPrompt := s.opts.BootPrompt
+	if s.opts.BootMode == "stdin" {
+		systemPrompt = ""
+	}
+
+	// SessionID preservation across restart: when the adapter advertises
+	// ProviderSessionID and we already observed a session ID on a prior
+	// attempt, feed it into BuildArgs's resume slot in place of the
+	// original SessionIDPreset. This is the difference between "restart
+	// preserves the conversation" and "restart starts a fresh
+	// conversation."
+	sessionIDPreset := s.opts.SessionIDPreset
+	if attempt > 0 && s.runtime.cfg.Caps.ProviderSessionID {
+		if sid, _ := s.lastSessionID.Load().(string); sid != "" {
+			sessionIDPreset = sid
+		}
+	}
+	args := s.runtime.cfg.Adapter.BuildArgs("", systemPrompt, sessionIDPreset)
+
+	cmd := exec.Command(binary, args...) //nolint:gosec // G204: adapter-sourced binary + args
+	cmd.Dir = s.opts.Workdir
+	if len(s.opts.Env) > 0 {
+		cmd.Env = s.opts.Env
+	} else {
+		cmd.Env = os.Environ()
+	}
+	if len(s.opts.ExtraFiles) > 0 {
+		cmd.ExtraFiles = s.opts.ExtraFiles
+	}
+
+	var sandboxCleanup func()
+	if s.opts.Profile.ID != "" {
+		cleanup, err := sandbox.Apply(cmd, s.opts.Profile, s.opts.Workdir)
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("agentsessions: sandbox apply: %w", err)
+		}
+		sandboxCleanup = cleanup
+	}
+
+	limitCleanup, err := applyResourceLimits(cmd, s.opts.ResourceLimits)
+	if err != nil {
+		if sandboxCleanup != nil {
+			sandboxCleanup()
+		}
+		return nil, nil, nil, fmt.Errorf("agentsessions: apply resource limits: %w", err)
+	}
+
+	ptmx, err := pty.Start(cmd)
+	if err != nil {
+		limitCleanup()
+		if sandboxCleanup != nil {
+			sandboxCleanup()
+		}
+		return nil, nil, nil, fmt.Errorf("agentsessions: pty start: %w", err)
+	}
+
+	s.ptmxLock.Lock()
+	s.cmd = cmd
+	s.ptmx = ptmx
+	s.ptmxLock.Unlock()
+
+	if cmd.Process != nil {
+		if attempt == 0 {
+			s.startedPID.Store(int32(cmd.Process.Pid))
+		}
+		s.lastPID.Store(int32(cmd.Process.Pid))
+	}
+
+	if attempt == 0 && s.opts.BootMode == "stdin" && s.opts.BootPrompt != "" {
+		if _, werr := io.WriteString(ptmx, s.opts.BootPrompt); werr != nil {
+			// Reap the child to avoid a zombie — pty.Start succeeded so
+			// cmd owns a live process.
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+			_ = ptmx.Close()
+			limitCleanup()
+			if sandboxCleanup != nil {
+				sandboxCleanup()
+			}
+			return nil, nil, nil, fmt.Errorf("agentsessions: write boot prompt: %w", werr)
+		}
+		// Boot-prompt write counts as activity for idle-kill bookkeeping.
+		s.activity.tick()
+	}
+
+	cleanup := func() {
+		limitCleanup()
+		if sandboxCleanup != nil {
+			sandboxCleanup()
+		}
+	}
+	return cmd, ptmx, cleanup, nil
+}
+
+// spawnReaderLegacy is the v0.5.0 reader: scans line-delimited output, tees
+// to logFile + Fanout, fans events out, ticks activity. Used only on the
+// non-supervised lifecycle. Closes copyDone on EOF.
+func (s *ptySession) spawnReaderLegacy(ptmx *os.File) {
 	go func() {
 		defer close(s.copyDone)
-
-		var sink io.Writer = s.logFile
-		if s.opts.Fanout != nil {
-			sink = io.MultiWriter(s.logFile, s.opts.Fanout)
-		}
-
-		scanner := bufio.NewScanner(ptmx)
-		scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024)
-
-		_, hasParser := s.runtime.cfg.Adapter.(provider.EventParser)
-
-		for scanner.Scan() {
-			raw := scanner.Bytes()
-			// Copy the line because scanner.Bytes() reuses its buffer on
-			// the next Scan() call. Append a newline back so log readers
-			// see line boundaries.
-			line := make([]byte, len(raw)+1)
-			copy(line, raw)
-			line[len(raw)] = '\n'
-			_, _ = sink.Write(line)
-
-			// Legacy stream-event parse — feed EventFanout + OnSessionID.
-			if evs, perr := s.runtime.cfg.Adapter.ParseLine(raw); perr == nil {
-				for _, ev := range evs {
-					if ev.Type == provider.EventSessionID && ev.SessionID != "" && s.opts.OnSessionID != nil {
-						s.opts.OnSessionID(ev.SessionID)
-					}
-					tryEventFanout(s.opts.EventFanout, ev)
-				}
-			}
-
-			// Typed-event parse — only when the consumer asked for it.
-			if s.opts.TypedEventCallback != nil {
-				var typed []pevents.Event
-				if hasParser {
-					if t, perr := s.runtime.cfg.Adapter.(provider.EventParser).ParseLineEvents(raw); perr == nil {
-						typed = t
-					}
-				}
-				for _, te := range typed {
-					s.opts.TypedEventCallback(te)
-				}
-			}
-		}
-		// Scanner errors on PTY EOF (EIO) are expected; ignored. The wait
-		// goroutine drives terminal-state recording via cmd.Wait() return.
+		s.runReaderLoop(ptmx)
 	}()
 }
 
-// spawnWaiter blocks on cmd.Wait, then nil-clears ptmx under the write
-// lock so in-flight writers see ErrNoInputChannel before the FD-destroying
-// Close runs. Closing ptmx unblocks the reader's scanner.
-func (s *ptySession) spawnWaiter(ptmx *os.File) {
-	go func() {
-		err := s.cmd.Wait()
+// runReaderLoop is the body of the reader: scans ptmx, ticks activity per
+// line, fans bytes + parsed events out. Returns when the scanner sees EOF
+// (typically because the ptmx Close in the waiter / supervisor unblocks
+// it). Shared between the legacy waiter and the per-attempt supervised
+// reader.
+func (s *ptySession) runReaderLoop(ptmx *os.File) {
+	var sink io.Writer = s.logFile
+	if s.opts.Fanout != nil {
+		sink = io.MultiWriter(s.logFile, s.opts.Fanout)
+	}
 
-		// Clear the struct field under the write lock so any in-flight
-		// SendInput/Resize sees ptmx==nil and returns ErrNoInputChannel
-		// before we close the captured local. Close blocks until the
-		// reader goroutine unwinds — we don't hold the lock across it.
+	scanner := bufio.NewScanner(ptmx)
+	scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024)
+
+	_, hasParser := s.runtime.cfg.Adapter.(provider.EventParser)
+
+	for scanner.Scan() {
+		raw := scanner.Bytes()
+		s.activity.tick()
+		// Copy the line because scanner.Bytes() reuses its buffer on the
+		// next Scan() call. Append a newline back so log readers see line
+		// boundaries.
+		line := make([]byte, len(raw)+1)
+		copy(line, raw)
+		line[len(raw)] = '\n'
+		_, _ = sink.Write(line)
+
+		// Legacy stream-event parse — feed EventFanout + OnSessionID, and
+		// capture the session ID into lastSessionID for restart-preservation
+		// on the supervised path.
+		if evs, perr := s.runtime.cfg.Adapter.ParseLine(raw); perr == nil {
+			for _, ev := range evs {
+				if ev.Type == provider.EventSessionID && ev.SessionID != "" {
+					s.lastSessionID.Store(ev.SessionID)
+					if s.opts.OnSessionID != nil {
+						s.opts.OnSessionID(ev.SessionID)
+					}
+				}
+				tryEventFanout(s.opts.EventFanout, ev)
+			}
+		}
+
+		// Typed-event parse — only when the consumer asked for it.
+		if s.opts.TypedEventCallback != nil {
+			var typed []pevents.Event
+			if hasParser {
+				if t, perr := s.runtime.cfg.Adapter.(provider.EventParser).ParseLineEvents(raw); perr == nil {
+					typed = t
+				}
+			}
+			for _, te := range typed {
+				s.opts.TypedEventCallback(te)
+			}
+		}
+	}
+	// Scanner errors on PTY EOF (EIO) are expected; ignored.
+}
+
+// spawnWaiterLegacy is the v0.5.0 waiter: blocks on cmd.Wait, nil-clears
+// ptmx under the write lock, closes ptmx (which unblocks the reader),
+// closes logFile after copyDone, records terminal state, signals s.done.
+// Used only on the non-supervised lifecycle.
+func (s *ptySession) spawnWaiterLegacy(ptmx *os.File, cmd *exec.Cmd) {
+	go func() {
+		err := cmd.Wait()
+
 		s.ptmxLock.Lock()
 		s.ptmx = nil
 		s.ptmxLock.Unlock()
@@ -319,16 +407,255 @@ func (s *ptySession) spawnWaiter(ptmx *os.File) {
 			s.done <- err
 			close(s.done)
 		})
-		s.doSandboxCleanup()
+		if s.legacyCleanup != nil {
+			s.legacyCleanup()
+		}
 	}()
 }
 
-func (s *ptySession) doSandboxCleanup() {
-	s.sandboxCleanupOnce.Do(func() {
-		if s.sandboxCleanup != nil {
-			s.sandboxCleanup()
+// runSupervised owns the supervised lifecycle. On entry, attempt 0 has
+// already been spawned (by Start) and its cmd/ptmx/cleanup are passed in.
+// The loop:
+//
+//  1. Run the per-attempt reader + supervisor goroutines.
+//  2. Wait for cmd.Wait; tear down supervisor goroutines.
+//  3. Examine exit; classify cause.
+//  4. If clean exit (PTY EOF) → finalize and return.
+//  5. If supervisor-driven kill (idle / watchdog) → finalize, NOT
+//     restart-eligible.
+//  6. If crash and attempts remain → backoff, OnRestart, spawn next
+//     attempt.
+//  7. Otherwise (exhausted) → finalize with restart_exhausted.
+func (s *ptySession) runSupervised(ctx context.Context, firstCmd *exec.Cmd, firstPtmx *os.File, firstCleanup func()) {
+	sup := s.opts.Supervisor
+	cmd := firstCmd
+	ptmx := firstPtmx
+	cleanup := firstCleanup
+	var lastExit *ExitError
+
+	defer func() {
+		// All-attempts cleanup: log close, doneOnce signal, copyDone close.
+		_ = s.logFile.Close()
+		s.alive.Store(false)
+		s.state.Store(int32(LiveStateStopped))
+		// copyDone is closed only once at the very end — any external
+		// observer waiting on it sees the session terminated.
+		select {
+		case <-s.copyDone:
+		default:
+			close(s.copyDone)
 		}
-	})
+		s.waitOnce.Do(func() {
+			if lastExit == nil {
+				s.waitCode.Store(0)
+				s.done <- nil
+			} else {
+				s.waitCode.Store(int32(lastExit.Code))
+				s.waitErr.Store(lastExit)
+				s.done <- lastExit
+			}
+			close(s.done)
+		})
+	}()
+
+	for attempt := 0; attempt <= sup.RestartOnCrash; attempt++ {
+		exit := s.waitOnceSupervised(ctx, cmd, ptmx, attempt)
+		cleanup()
+		lastExit = exit
+
+		if exit == nil {
+			return // clean exit (PTY EOF mapped to nil)
+		}
+		if !restartEligible(exit) {
+			return // supervisor-driven kill or ctx cancel
+		}
+		if attempt >= sup.RestartOnCrash {
+			lastExit.Cause = CauseRestartExhausted
+			return
+		}
+
+		// Restart-eligible: backoff, OnRestart, respawn.
+		backoff := computeRestartBackoff(attempt+1, sup.MaxRestartBackoff)
+		select {
+		case <-ctx.Done():
+			return
+		case <-s.stopRequested:
+			return
+		case <-time.After(backoff):
+		}
+		if sup.OnRestart != nil {
+			sup.OnRestart(attempt+1, exit)
+		}
+		nextCmd, nextPtmx, nextCleanup, err := s.spawnAttempt(attempt + 1)
+		if err != nil {
+			lastExit = &ExitError{Code: -1, Cause: CauseRestartExhausted, waitErr: err}
+			return
+		}
+		cmd = nextCmd
+		ptmx = nextPtmx
+		cleanup = nextCleanup
+	}
+}
+
+// waitOnceSupervised is a single per-attempt lifecycle: spawn reader,
+// supervisor goroutines, watch for caller Stop, await cmd.Wait, tear
+// everything down, classify the exit. Returns the per-attempt *ExitError
+// (nil only on a clean exit).
+func (s *ptySession) waitOnceSupervised(ctx context.Context, cmd *exec.Cmd, ptmx *os.File, attempt int) *ExitError {
+	procDone := make(chan struct{})
+	readerDone := make(chan struct{})
+	cause := &supState{}
+	startedAt := time.Now()
+	// Reset activity to attempt-start so idle-kill measures from now, not
+	// from the prior attempt's last tick.
+	s.activity.tick()
+
+	// Reader: drains ptmx until EOF (which fires when ptmx is Close'd
+	// after cmd.Wait returns).
+	go func() {
+		defer close(readerDone)
+		s.runReaderLoop(ptmx)
+	}()
+
+	sup := s.opts.Supervisor
+	var supWG sync.WaitGroup
+	if sup.IdleKill > 0 {
+		supWG.Add(1)
+		go func() {
+			defer supWG.Done()
+			s.superviseIdle(cmd, cause, procDone, startedAt)
+		}()
+	}
+	if sup.WatchdogTimeout > 0 {
+		supWG.Add(1)
+		go func() {
+			defer supWG.Done()
+			s.superviseWatchdog(cmd, cause, procDone, startedAt)
+		}()
+	}
+
+	// Stop / ctx watcher: caller-driven shutdown converts to SIGTERM
+	// followed by 5s grace then SIGKILL. cause is left empty so the loop
+	// classifies this as ctx cancel (non-restart-eligible) but distinct
+	// from idle/watchdog.
+	stopWatcherDone := make(chan struct{})
+	go func() {
+		defer close(stopWatcherDone)
+		select {
+		case <-procDone:
+			return
+		case <-s.stopRequested:
+			killWithGrace(cmd, 5*time.Second, procDone)
+		case <-ctx.Done():
+			killWithGrace(cmd, 5*time.Second, procDone)
+		}
+	}()
+
+	waitErr := cmd.Wait()
+	close(procDone)
+	supWG.Wait()
+	<-stopWatcherDone
+
+	// Nil-clear ptmx so in-flight SendInput / Resize sees ErrNoInputChannel
+	// before the close runs. Close unblocks the reader's scanner.
+	s.ptmxLock.Lock()
+	s.ptmx = nil
+	s.ptmxLock.Unlock()
+	_ = ptmx.Close()
+	<-readerDone
+
+	c := cause.getCause()
+	exit := buildExitError(cmd.ProcessState, waitErr, c)
+	if exit == nil {
+		// Clean exit — but on the supervised path, "PTY EOF" is the
+		// expected clean termination. Map to nil (signals "done, don't
+		// restart") via the supervised loop's logic. We return nil here.
+		return nil
+	}
+	// Distinguish ctx-cancelled exits from genuine crashes so the loop
+	// doesn't restart on Stop.
+	if c == "" && (ctx.Err() != nil || s.isStopRequested()) {
+		// Treat as non-restart-eligible by setting a sentinel cause that
+		// passes through restartEligible's "Cause != ''" check.
+		exit.Cause = "" // leave empty; the supervised loop checks ctx separately below
+	}
+	_ = attempt // attempt is currently informational; reserved for future telemetry hooks
+	return exit
+}
+
+func (s *ptySession) isStopRequested() bool {
+	select {
+	case <-s.stopRequested:
+		return true
+	default:
+		return false
+	}
+}
+
+// superviseIdle polls activity; if idle exceeds IdleKill, sets cause =
+// idle_timeout, sends SIGTERM, then SIGKILL after 5s grace.
+func (s *ptySession) superviseIdle(cmd *exec.Cmd, cause *supState, procDone <-chan struct{}, startedAt time.Time) {
+	threshold := s.opts.Supervisor.IdleKill
+	tick := threshold / 4
+	if tick < 100*time.Millisecond {
+		tick = 100 * time.Millisecond
+	}
+	timer := time.NewTicker(tick)
+	defer timer.Stop()
+
+	for {
+		select {
+		case <-procDone:
+			return
+		case <-timer.C:
+			idle := s.activity.idleSince(startedAt)
+			if idle < threshold {
+				continue
+			}
+			if !cause.trySetCause(CauseIdleTimeout) {
+				return
+			}
+			killWithGrace(cmd, 5*time.Second, procDone)
+			return
+		}
+	}
+}
+
+// superviseWatchdog polls activity; if no tick within WatchdogTimeout,
+// SIGKILLs directly (no SIGTERM grace) and sets cause = watchdog_kill.
+//
+// When ActivityCallback is non-nil, the watchdog observes it as activity
+// (the callback's invocations come from the per-line parser; ptmx I/O
+// continues to tick the same activity tracker). When ActivityCallback is
+// nil, the watchdog falls back to ptmx Read+Write activity, effectively a
+// stricter idle-kill.
+func (s *ptySession) superviseWatchdog(cmd *exec.Cmd, cause *supState, procDone <-chan struct{}, startedAt time.Time) {
+	threshold := s.opts.Supervisor.WatchdogTimeout
+	tick := threshold / 4
+	if tick < 100*time.Millisecond {
+		tick = 100 * time.Millisecond
+	}
+	timer := time.NewTicker(tick)
+	defer timer.Stop()
+
+	for {
+		select {
+		case <-procDone:
+			return
+		case <-timer.C:
+			idle := s.activity.idleSince(startedAt)
+			if idle < threshold {
+				continue
+			}
+			if !cause.trySetCause(CauseWatchdogKill) {
+				return
+			}
+			if cmd.Process != nil {
+				_ = cmd.Process.Signal(syscall.SIGKILL)
+			}
+			return
+		}
+	}
 }
 
 func (s *ptySession) Wait() (int, error) {
@@ -346,12 +673,25 @@ func (s *ptySession) Stop(ctx context.Context) error {
 	s.stopOnce.Do(func() {
 		s.alive.Store(false)
 		s.state.Store(int32(LiveStateStopped))
-		if s.cmd.Process == nil {
+		// Signal the supervised loop / stop-watcher that caller wants to
+		// shut down. Both legacy and supervised paths observe this.
+		close(s.stopRequested)
+
+		// Snapshot current cmd under lock — the supervised path may
+		// already be between attempts (cmd nil briefly during respawn).
+		s.ptmxLock.Lock()
+		cmd := s.cmd
+		s.ptmxLock.Unlock()
+		if cmd == nil || cmd.Process == nil {
 			return
 		}
-		// SIGTERM → 5s grace → SIGKILL. cmd.Wait observes the resulting exit.
-		if err := s.cmd.Process.Signal(syscall.SIGTERM); err != nil {
-			// Process already gone; nothing left to do.
+
+		// On the supervised path, the stop-watcher inside waitOnceSupervised
+		// will issue the kill — we don't need to here. But we still issue
+		// SIGTERM as a belt-and-suspenders to cover the legacy path
+		// (which has no stop-watcher) and the supervised between-attempts
+		// race window.
+		if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
 			return
 		}
 		const grace = 5 * time.Second
@@ -359,11 +699,16 @@ func (s *ptySession) Stop(ctx context.Context) error {
 		defer timer.Stop()
 		select {
 		case <-s.done:
-			// exit observed within grace
+			// Exit observed within grace; the lifecycle goroutines have
+			// already torn down.
 		case <-timer.C:
-			killErr = s.cmd.Process.Kill()
+			if cmd.Process != nil {
+				killErr = cmd.Process.Kill()
+			}
 		case <-ctx.Done():
-			killErr = s.cmd.Process.Kill()
+			if cmd.Process != nil {
+				killErr = cmd.Process.Kill()
+			}
 		}
 	})
 	return killErr
@@ -387,20 +732,19 @@ func (s *ptySession) SendInput(_ context.Context, data []byte) error {
 	if _, err := s.ptmx.Write(payload); err != nil {
 		return err
 	}
+	s.activity.tick()
 	return nil
 }
 
 func (s *ptySession) Resize(_ context.Context, rows, cols uint16) error {
 	// Honor the Capabilities.Resize declaration: when the runtime declares
 	// Resize unsupported, this is a no-op even on a PTY-backed session.
-	// Matches the Session.Resize doc + Capabilities.Resize semantics.
 	if !s.runtime.cfg.Caps.Resize {
 		return nil
 	}
 	s.ptmxLock.Lock()
 	defer s.ptmxLock.Unlock()
 	if s.ptmx == nil {
-		// Session terminated; resize is a clean no-op (no caller-visible error).
 		return nil
 	}
 	return pty.Setsize(s.ptmx, &pty.Winsize{Rows: rows, Cols: cols})
@@ -433,6 +777,13 @@ func (s *ptySession) LivePID() int {
 // LastPID — PIDReporter.
 func (s *ptySession) LastPID() int {
 	return int(s.lastPID.Load())
+}
+
+// ProviderSessionID — SessionIDer (when Caps.ProviderSessionID=true).
+// Returns the most-recently observed session ID, or empty string if none.
+func (s *ptySession) ProviderSessionID() string {
+	id, _ := s.lastSessionID.Load().(string)
+	return id
 }
 
 var (
