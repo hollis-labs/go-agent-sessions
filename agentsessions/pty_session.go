@@ -67,10 +67,17 @@ func (r *ptyRuntime) Start(ctx context.Context, opts StartOptions) (Session, err
 		return nil, err
 	}
 
-	// Args: long-lived PTY spawns once. Empty prompt; the boot prompt either
-	// goes via stdin (BootMode == "stdin") or is folded into the system prompt
-	// the adapter places in its argv. Per-turn prompts arrive via SendInput.
-	args := r.cfg.Adapter.BuildArgs("", opts.BootPrompt, opts.SessionIDPreset)
+	// Args: long-lived PTY spawns once. Empty prompt slot; the boot prompt is
+	// delivered through exactly one channel — either stdin (BootMode == "stdin",
+	// in which case BuildArgs receives an empty system prompt to avoid double
+	// injection) or the adapter's argv-supplied system prompt (any other
+	// BootMode, in which case BuildArgs receives opts.BootPrompt). Per-turn
+	// prompts arrive via SendInput regardless.
+	systemPrompt := opts.BootPrompt
+	if opts.BootMode == "stdin" {
+		systemPrompt = ""
+	}
+	args := r.cfg.Adapter.BuildArgs("", systemPrompt, opts.SessionIDPreset)
 
 	cmd := exec.Command(binary, args...) //nolint:gosec // G204: adapter-sourced binary + args
 	cmd.Dir = opts.Workdir
@@ -128,7 +135,11 @@ func (r *ptyRuntime) Start(ctx context.Context, opts StartOptions) (Session, err
 
 	if opts.BootMode == "stdin" && opts.BootPrompt != "" {
 		if _, werr := io.WriteString(ptmx, opts.BootPrompt); werr != nil {
+			// Reap the child to avoid a zombie — pty.Start succeeded so cmd
+			// owns a live process. Kill + Wait is the minimal-cleanup pair;
+			// errors from either are not actionable here.
 			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
 			_ = ptmx.Close()
 			_ = logF.Close()
 			if sandboxCleanup != nil {
@@ -184,10 +195,17 @@ type ptySession struct {
 	logFile        *os.File
 	sandboxCleanup func()
 
-	// ptmxLock serializes Write/Resize against the wait goroutine's
-	// pointer-clear + Close pair. The reader goroutine owns the read
-	// end and does not take this lock.
-	ptmxLock sync.RWMutex
+	// ptmxLock serializes SendInput / Resize against (a) each other and
+	// (b) the wait goroutine's pointer-clear + Close pair. Exclusive
+	// (sync.Mutex, not RWMutex) so concurrent SendInput callers do not
+	// interleave bytes on the PTY master — turn boundaries on a long-
+	// lived TUI matter and Go's *os.File internal locking is not granular
+	// enough to guarantee atomic per-input writes for arbitrary payloads.
+	//
+	// The reader goroutine captures the ptmx local at spawn and does not
+	// take this lock at all (see spawnReader). Only writers + the
+	// destroyer touch this mutex.
+	ptmxLock sync.Mutex
 
 	state      atomic.Int32 // LiveState
 	alive      atomic.Bool
@@ -355,8 +373,8 @@ func (s *ptySession) SendInput(_ context.Context, data []byte) error {
 	if !s.alive.Load() {
 		return ErrNoInputChannel
 	}
-	s.ptmxLock.RLock()
-	defer s.ptmxLock.RUnlock()
+	s.ptmxLock.Lock()
+	defer s.ptmxLock.Unlock()
 	if s.ptmx == nil {
 		return ErrNoInputChannel
 	}
@@ -373,8 +391,14 @@ func (s *ptySession) SendInput(_ context.Context, data []byte) error {
 }
 
 func (s *ptySession) Resize(_ context.Context, rows, cols uint16) error {
-	s.ptmxLock.RLock()
-	defer s.ptmxLock.RUnlock()
+	// Honor the Capabilities.Resize declaration: when the runtime declares
+	// Resize unsupported, this is a no-op even on a PTY-backed session.
+	// Matches the Session.Resize doc + Capabilities.Resize semantics.
+	if !s.runtime.cfg.Caps.Resize {
+		return nil
+	}
+	s.ptmxLock.Lock()
+	defer s.ptmxLock.Unlock()
 	if s.ptmx == nil {
 		// Session terminated; resize is a clean no-op (no caller-visible error).
 		return nil

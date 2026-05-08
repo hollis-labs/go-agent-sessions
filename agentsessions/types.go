@@ -267,14 +267,20 @@ type StartOptions struct {
 	// EventFanout chan<- provider.StreamEvent surface but uses go-providers
 	// Tier-2 typed events: callers see events.Delta / events.ToolUse /
 	// events.ToolResult / events.SubagentSpawn / events.SessionID /
-	// events.Done / events.Error / events.Heartbeat / events.Thinking /
-	// events.SubprocessStderr.
+	// events.Done / events.Error / events.Heartbeat / events.Thinking.
 	//
-	// For the PTY runtime, the callback fires per-line from the reader
-	// goroutine after the adapter's ParseLineEvents (or translateStreamEvents
-	// fallback) parses the line. For the adapter runtime, typed events
-	// flow through go-providers' WithEvents context plumbing — set this
-	// callback and the runtime threads it through.
+	// v0.4.0 scope:
+	//   - PTY runtime (Caps.PTY=true): the callback fires per-line from the
+	//     reader goroutine, ONLY when the adapter implements the optional
+	//     provider.EventParser interface. Adapters without EventParser
+	//     produce no typed events through this callback (no fallback
+	//     translation in v0.4.0; the legacy EventFanout surface still
+	//     receives ParseLine output).
+	//   - Adapter runtime (Caps.PTY=false, subprocess-per-turn): this field
+	//     is currently NOT consulted. The adapter runtime drives runner.Run
+	//     which surfaces provider events as runner.EventProviderEvent
+	//     (StreamEvent shape). Typed events on the adapter path is v0.5.0+
+	//     work — see CHANGELOG and the implementer report's "Out of scope".
 	//
 	// Sends are synchronous; treat the callback the way you'd treat an
 	// io.Writer's Write — keep the work short or hand off to your own
