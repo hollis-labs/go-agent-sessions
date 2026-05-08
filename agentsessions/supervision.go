@@ -14,22 +14,23 @@ import (
 // SupervisorOptions configures opt-in supervision for a Session — idle-kill,
 // restart-on-crash, and watchdog. The zero value (StartOptions.Supervisor ==
 // nil) preserves go-agent-sessions's default "spawn once, run to completion,
-// return" behavior on both runtime shapes.
+// return" behavior.
 //
-// On the PTY runtime (Caps.PTY=true), supervision is implemented natively
-// against the long-lived child: idle-kill / restart / watchdog goroutines
-// observe cmd.Wait and the ptmx I/O streams directly, without going through
-// go-runner. Restart preserves the provider-side agent_session_id when
-// Caps.ProviderSessionID is true.
+// v0.6.0 scope: PTY runtime (Caps.PTY=true) only. Supervision is implemented
+// natively against the long-lived child — idle-kill / restart / watchdog
+// goroutines observe cmd.Wait and the ptmx I/O streams directly, without
+// going through go-runner. Restart preserves the provider-side
+// agent_session_id when Caps.ProviderSessionID is true.
 //
-// On the adapter runtime (Caps.PTY=false), the same options are forwarded to
-// go-runner via runner.Config.Supervisor for each subprocess-per-turn
-// runner.Run call. OnRestart fires from runner.EventRestart in that path.
+// On the adapter runtime (Caps.PTY=false), this struct is currently NOT
+// consulted — adapter-path forwarding to runner.Config.Supervisor is a
+// v0.6.x follow-up blocked on go-runner publishing its v0.3.0 supervision
+// API. See StartOptions.Supervisor godoc and the v0.6.0 CHANGELOG.
 //
 // Field shape mirrors go-runner's SupervisorOptions (same names, same units)
-// so consumers can build a single config and apply it to either path. The
-// PTY-specific OnRestart hook is the lone addition; on the adapter path it
-// is wired through runner.Event observation.
+// so consumers can build a single config that targets both paths once the
+// adapter-path forwarding lands. The PTY-specific OnRestart hook is the
+// lone addition.
 type SupervisorOptions struct {
 	// IdleKill terminates the child when no I/O activity (ptmx Read or
 	// Write on the PTY path; runner stdout/stderr on the adapter path)
@@ -64,18 +65,20 @@ type SupervisorOptions struct {
 	// terminate stuck processes that won't respond to graceful signals.
 	WatchdogTimeout time.Duration
 
-	// ActivityCallback, when non-nil, is invoked by the runtime each time
-	// "meaningful" application-level activity is observed. Used to
-	// supplement the default ptmx I/O ticking when the consumer's notion
-	// of "progress" differs from raw byte flow.
-	//
-	// On the PTY path, when this callback is nil, the watchdog falls back
-	// to ptmx Read+Write activity (effectively making it a stricter
-	// idle-kill). When non-nil, the watchdog uses callback ticks; ptmx
-	// I/O still ticks idle-kill independently.
+	// ActivityCallback, when non-nil, is invoked by the PTY runtime each
+	// time it observes ptmx I/O activity (one call per reader-line, one
+	// per successful SendInput). Useful for telemetry, heartbeat hooks,
+	// or feeding an app-level "still alive" signal upstream.
 	//
 	// Sends are synchronous; treat the callback like an io.Writer's
 	// Write — keep the work short or hand off to your own goroutine.
+	//
+	// v0.6.0 scope: the watchdog and idle-kill always use the runtime's
+	// internal ptmx-I/O activity tracker, regardless of whether
+	// ActivityCallback is set. A future increment may add a separate
+	// app-level activity tracker that the consumer can tick from outside
+	// the per-line parser path. Until then, ActivityCallback is purely
+	// observational from the consumer's side.
 	ActivityCallback func()
 
 	// OnRestart fires after backoff completes, just before the new child
@@ -168,11 +171,6 @@ const (
 	// ResourceLimits cap (e.g. CPU time → SIGXCPU). Detection is
 	// best-effort; not all platforms surface the underlying cause.
 	CauseResourceLimit = "resource_limit"
-
-	// CausePTYEOF — PTY-specific: the child closed its end of the PTY
-	// without an error (clean end-of-stream, distinct from a non-zero
-	// crash). Mapped to nil exit by the supervisor loop.
-	CausePTYEOF = "pty_eof"
 )
 
 // ExitError is the structured outcome of a non-clean session exit. The PTY

@@ -525,6 +525,132 @@ func TestPTYResourceLimits_MemoryMax_LinuxOnly(t *testing.T) {
 	}
 }
 
+func TestPTYSupervisor_StopWithRestartZero_NotMisclassifiedAsExhausted(t *testing.T) {
+	// Regression for the Copilot-flagged bug: with RestartOnCrash=0, a
+	// Stop-triggered SIGTERM produces a non-zero exit. Without the
+	// ctx/Stop short-circuit in runSupervised, that exit would satisfy
+	// restartEligible (Code != 0, no cause) and then be labeled
+	// CauseRestartExhausted by the `attempt >= RestartOnCrash` branch.
+	// Assert: caller-driven Stop never produces restart_exhausted.
+	dir := t.TempDir()
+	script := writePTYEchoScript(t, dir)
+	rt, _ := NewFromAdapter(AdapterRuntimeConfig{
+		ID:      "pty-stop-zero-restart",
+		Adapter: &ptyEchoAdapter{scriptPath: script},
+		Caps:    Capabilities{PTY: true, BinaryRequired: true},
+	})
+	sess, err := rt.Start(context.Background(), StartOptions{
+		Workdir: dir,
+		LogPath: filepath.Join(dir, "session.log"),
+		Supervisor: &SupervisorOptions{
+			IdleKill:       1 * time.Hour, // long; we'll Stop first
+			RestartOnCrash: 0,             // single shot; the trigger for the bug
+		},
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// Brief settle so the child is in the wait loop.
+	time.Sleep(100 * time.Millisecond)
+	if err := sess.Stop(context.Background()); err != nil {
+		t.Errorf("Stop: %v", err)
+	}
+	_, waitErr := sess.Wait()
+
+	if waitErr == nil {
+		// SIGTERM may produce a clean enough exit on some hosts;
+		// nil is acceptable.
+		return
+	}
+	var xe *ExitError
+	if errors.As(waitErr, &xe) && xe.Cause == CauseRestartExhausted {
+		t.Errorf("Stop-driven exit misclassified as restart_exhausted: %+v", xe)
+	}
+}
+
+func TestPTYSupervisor_NegativeRestartOnCrash_DoesNotLeak(t *testing.T) {
+	// Regression for the Copilot-flagged bug: RestartOnCrash < 0 caused
+	// the loop body to be skipped entirely, leaking the first-attempt
+	// child. Assert: negative RestartOnCrash is clamped to 0; the first
+	// attempt's wait still observes cmd.Wait, and Wait() returns within
+	// a bounded time after the child exits.
+	dir := t.TempDir()
+	script := writePTYEchoScript(t, dir)
+	rt, _ := NewFromAdapter(AdapterRuntimeConfig{
+		ID:      "pty-negative-restart",
+		Adapter: &ptyEchoAdapter{scriptPath: script},
+		Caps:    Capabilities{PTY: true, BinaryRequired: true},
+	})
+	sess, err := rt.Start(context.Background(), StartOptions{
+		Workdir: dir,
+		LogPath: filepath.Join(dir, "session.log"),
+		Supervisor: &SupervisorOptions{
+			RestartOnCrash: -5,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// Stop the child; the supervised loop must observe the exit and
+	// drain Wait. Without the clamp, Wait would block forever.
+	time.Sleep(100 * time.Millisecond)
+	_ = sess.Stop(context.Background())
+
+	done := make(chan struct{})
+	go func() { _, _ = sess.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Wait blocked — supervised loop did not observe first-attempt exit (leak under negative RestartOnCrash)")
+	}
+}
+
+func TestPTYSupervisor_ActivityCallback_FiresOnPtmxIO(t *testing.T) {
+	// Regression for the Copilot-flagged bug: ActivityCallback was
+	// documented as runtime-fired but never actually invoked. Now wired
+	// to the same tickActivity helper as ptmx I/O — the callback fires
+	// once per reader-line and once per successful SendInput.
+	dir := t.TempDir()
+	script := writePTYEchoScript(t, dir)
+	rt, _ := NewFromAdapter(AdapterRuntimeConfig{
+		ID:      "pty-activity-cb",
+		Adapter: &ptyEchoAdapter{scriptPath: script},
+		Caps:    Capabilities{PTY: true, BinaryRequired: true},
+	})
+
+	var ticks atomic.Int32
+	sess, err := rt.Start(context.Background(), StartOptions{
+		Workdir: dir,
+		LogPath: filepath.Join(dir, "session.log"),
+		Supervisor: &SupervisorOptions{
+			IdleKill: 30 * time.Second, // long; we just exercise the callback
+			ActivityCallback: func() {
+				ticks.Add(1)
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = sess.Stop(context.Background()) }()
+
+	// One SendInput → one write tick + 2 read-line ticks (delta + done).
+	if err := sess.SendInput(context.Background(), []byte("ping")); err != nil {
+		t.Fatalf("SendInput: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if ticks.Load() >= 2 {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Errorf("ActivityCallback fired %d times, want >= 2 (1 write + >=1 reader-line)", ticks.Load())
+}
+
 func TestPTYSupervisor_StopDuringSupervised_TerminatesCleanly(t *testing.T) {
 	// Stop on an actively-supervised session should drain Wait without
 	// triggering a restart, even though RestartOnCrash > 0.

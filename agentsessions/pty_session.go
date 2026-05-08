@@ -293,7 +293,7 @@ func (s *ptySession) spawnAttempt(attempt int) (*exec.Cmd, *os.File, func(), err
 			return nil, nil, nil, fmt.Errorf("agentsessions: write boot prompt: %w", werr)
 		}
 		// Boot-prompt write counts as activity for idle-kill bookkeeping.
-		s.activity.tick()
+		s.tickActivity()
 	}
 
 	cleanup := func() {
@@ -333,7 +333,7 @@ func (s *ptySession) runReaderLoop(ptmx *os.File) {
 
 	for scanner.Scan() {
 		raw := scanner.Bytes()
-		s.activity.tick()
+		s.tickActivity()
 		// Copy the line because scanner.Bytes() reuses its buffer on the
 		// next Scan() call. Append a newline back so log readers see line
 		// boundaries.
@@ -428,6 +428,13 @@ func (s *ptySession) spawnWaiterLegacy(ptmx *os.File, cmd *exec.Cmd) {
 //  7. Otherwise (exhausted) → finalize with restart_exhausted.
 func (s *ptySession) runSupervised(ctx context.Context, firstCmd *exec.Cmd, firstPtmx *os.File, firstCleanup func()) {
 	sup := s.opts.Supervisor
+	// Clamp RestartOnCrash to a non-negative value. A negative value
+	// would skip the loop body entirely on the first iteration, leaving
+	// the already-spawned first attempt's cmd.Wait unobserved — a leak.
+	maxRestarts := sup.RestartOnCrash
+	if maxRestarts < 0 {
+		maxRestarts = 0
+	}
 	cmd := firstCmd
 	ptmx := firstPtmx
 	cleanup := firstCleanup
@@ -458,18 +465,28 @@ func (s *ptySession) runSupervised(ctx context.Context, firstCmd *exec.Cmd, firs
 		})
 	}()
 
-	for attempt := 0; attempt <= sup.RestartOnCrash; attempt++ {
+	for attempt := 0; attempt <= maxRestarts; attempt++ {
 		exit := s.waitOnceSupervised(ctx, cmd, ptmx, attempt)
 		cleanup()
 		lastExit = exit
 
+		// Caller-driven Stop or context cancel: never restart, never label
+		// restart_exhausted. Stop's SIGTERM may produce a non-zero exit
+		// that would otherwise satisfy restartEligible; the explicit
+		// short-circuit prevents that misclassification. The exit's Cause
+		// stays as observed (empty for Stop's SIGTERM, idle_timeout /
+		// watchdog_kill if those fired during drain).
+		if ctx.Err() != nil || s.isStopRequested() {
+			return
+		}
+
 		if exit == nil {
-			return // clean exit (PTY EOF mapped to nil)
+			return // clean exit
 		}
 		if !restartEligible(exit) {
-			return // supervisor-driven kill or ctx cancel
+			return // supervisor-driven kill (idle/watchdog)
 		}
-		if attempt >= sup.RestartOnCrash {
+		if attempt >= maxRestarts {
 			lastExit.Cause = CauseRestartExhausted
 			return
 		}
@@ -564,23 +581,8 @@ func (s *ptySession) waitOnceSupervised(ctx context.Context, cmd *exec.Cmd, ptmx
 	_ = ptmx.Close()
 	<-readerDone
 
-	c := cause.getCause()
-	exit := buildExitError(cmd.ProcessState, waitErr, c)
-	if exit == nil {
-		// Clean exit — but on the supervised path, "PTY EOF" is the
-		// expected clean termination. Map to nil (signals "done, don't
-		// restart") via the supervised loop's logic. We return nil here.
-		return nil
-	}
-	// Distinguish ctx-cancelled exits from genuine crashes so the loop
-	// doesn't restart on Stop.
-	if c == "" && (ctx.Err() != nil || s.isStopRequested()) {
-		// Treat as non-restart-eligible by setting a sentinel cause that
-		// passes through restartEligible's "Cause != ''" check.
-		exit.Cause = "" // leave empty; the supervised loop checks ctx separately below
-	}
-	_ = attempt // attempt is currently informational; reserved for future telemetry hooks
-	return exit
+	_ = attempt // reserved for future per-attempt telemetry hooks
+	return buildExitError(cmd.ProcessState, waitErr, cause.getCause())
 }
 
 func (s *ptySession) isStopRequested() bool {
@@ -589,6 +591,19 @@ func (s *ptySession) isStopRequested() bool {
 		return true
 	default:
 		return false
+	}
+}
+
+// tickActivity records ptmx I/O activity into the internal tracker (used by
+// the idle-kill / watchdog goroutines) and fires the consumer's
+// Supervisor.ActivityCallback when set, so consumers can observe per-tick
+// activity for telemetry / heartbeat purposes. Called from the reader
+// goroutine on each line and from SendInput after a successful write; the
+// boot-prompt write in spawnAttempt also ticks here.
+func (s *ptySession) tickActivity() {
+	s.activity.tick()
+	if sup := s.opts.Supervisor; sup != nil && sup.ActivityCallback != nil {
+		sup.ActivityCallback()
 	}
 }
 
@@ -732,7 +747,7 @@ func (s *ptySession) SendInput(_ context.Context, data []byte) error {
 	if _, err := s.ptmx.Write(payload); err != nil {
 		return err
 	}
-	s.activity.tick()
+	s.tickActivity()
 	return nil
 }
 
