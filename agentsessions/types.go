@@ -269,12 +269,12 @@ type StartOptions struct {
 	// events.ToolResult / events.SubagentSpawn / events.SessionID /
 	// events.Done / events.Error / events.Heartbeat / events.Thinking.
 	//
-	// v0.4.0 scope:
+	// v0.5.0 scope:
 	//   - PTY runtime (Caps.PTY=true): the callback fires per-line from the
 	//     reader goroutine, ONLY when the adapter implements the optional
 	//     provider.EventParser interface. Adapters without EventParser
 	//     produce no typed events through this callback (no fallback
-	//     translation in v0.4.0; the legacy EventFanout surface still
+	//     translation in v0.5.0; the legacy EventFanout surface still
 	//     receives ParseLine output).
 	//   - Adapter runtime (Caps.PTY=false, subprocess-per-turn): this field
 	//     is currently NOT consulted. The adapter runtime drives runner.Run

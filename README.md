@@ -275,7 +275,7 @@ Round-trip semantics: `SinceSeq=N` yields exactly bytes `N+1..head` in the
 ring; if `SinceSeq` points before the ring's start (history evicted), the
 full ring is replayed and the gap between `SinceSeq` and `ringStart` is
 silently lost — callers detect this by comparing expected vs received byte
-counts. Frozen surface as of v0.4.0; ring/depth tunable via
+counts. Frozen surface as of v0.5.0; ring/depth tunable via
 `StartOptions.RingBytes` and `StartOptions.SubscriberDepth`. See `attach.go`
 package doc for the full drop-policy + lifecycle contract.
 

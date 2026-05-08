@@ -15,7 +15,7 @@ const (
 	defaultSubscriberDepth = 64
 )
 
-// Attach broker — public surface (frozen as of v0.4.0)
+// Attach broker — public surface (frozen as of v0.5.0)
 //
 // The attach broker behind Manager.Attach / Manager.AttachWith is an
 // in-memory drop-oldest ring + per-subscriber drop-on-slow fanout. The
@@ -58,8 +58,8 @@ const (
 //     replay (whatever's still in the ring) and an already-closed channel,
 //     so they drain and exit cleanly.
 //
-// This contract is frozen as of v0.4.0. Reform (drop-policy alternatives,
-// larger rings, etc.) is separate work; the audit deliverable for v0.4.0
+// This contract is frozen as of v0.5.0. Reform (drop-policy alternatives,
+// larger rings, etc.) is separate work; the audit deliverable for v0.5.0
 // is documentation + the SinceSeq round-trip test
 // (TestManager_AttachSinceSeq_RoundTrip_NoGapNoDup).
 

@@ -2,9 +2,11 @@
 
 All notable changes to `go-agent-sessions` are documented in this file. Per-release notes are also published as GitHub Releases.
 
-## v0.4.0 — 2026-05-08
+## v0.5.0 — 2026-05-08
 
 Tier 3 of the portfolio agent-boot foundation: long-lived PTY runtime, AutoFireFirstTurn hook, two-dir model (Workdir + WorkspaceDir), capability-driven runtime selection, structured PID propagation across turn boundaries, and an attach-broker stability audit.
+
+> **Version note.** Originally drafted as v0.4.0 in the implementer prompt, cut as v0.5.0 because a stale `v0.4.0` tag from 2026-04-27 already pointed at an unrelated commit (`StartOptions.ExtraFiles` passthrough) without an associated release. Skipping `v0.4.0` is cleaner than rewriting tag history.
 
 Authoritative cross-app design: `agent-workspaces/planning/agent-boot-unification/2026-05-07-cross-app-design.md` §9 (PTY analysis, path c) + §10 (lib gaps).
 
@@ -27,7 +29,7 @@ Existing adapters (`Caps.PTY=false`) see no behavior change. The claude-code ada
 
 ### Attach broker — public surface frozen
 
-The attach broker behind `Manager.Attach` / `Manager.AttachWith` (in-memory drop-oldest ring + per-subscriber drop-on-slow fanout) is documented as a v0.4.0 stable surface. `AttachOptions.SinceSeq` round-trip semantics — disconnect at byte N, reconnect with `SinceSeq=N`, receive exactly bytes N+1..head with no duplication or gap — are now covered by `TestManager_AttachSinceSeq_RoundTrip_NoGapNoDup`. Drop policy + retention are documented in `attach.go`. No code changes; reform (drop-policy alternatives, larger rings) is separate work.
+The attach broker behind `Manager.Attach` / `Manager.AttachWith` (in-memory drop-oldest ring + per-subscriber drop-on-slow fanout) is documented as a v0.5.0 stable surface. `AttachOptions.SinceSeq` round-trip semantics — disconnect at byte N, reconnect with `SinceSeq=N`, receive exactly bytes N+1..head with no duplication or gap — are now covered by `TestManager_AttachSinceSeq_RoundTrip_NoGapNoDup`. Drop policy + retention are documented in `attach.go`. No code changes; reform (drop-policy alternatives, larger rings) is separate work.
 
 ### Tests
 
