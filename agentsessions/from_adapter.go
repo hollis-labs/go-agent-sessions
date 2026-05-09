@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	llmtypes "github.com/hollis-labs/go-llm-types"
 	"github.com/hollis-labs/go-providers/provider"
 	"github.com/hollis-labs/go-runner/runner"
 )
@@ -258,8 +259,8 @@ func (s *adapterSession) handleRunnerEvent(ev runner.Event) {
 			s.lastPID.Store(int32(pid))
 		}
 	case runner.EventProviderEvent:
-		if pe, ok := ev.Payload["event"].(provider.StreamEvent); ok {
-			if pe.Type == provider.EventSessionID && pe.SessionID != "" {
+		if pe, ok := ev.Payload["event"].(llmtypes.StreamEvent); ok {
+			if pe.Type == llmtypes.EventSessionID && pe.SessionID != "" {
 				s.sessionID.Store(pe.SessionID)
 				if s.opts.OnSessionID != nil {
 					s.opts.OnSessionID(pe.SessionID)
@@ -329,21 +330,21 @@ var _ PIDReporter = (*adapterSession)(nil)
 // without the lib having to define a wire format. Adapters that want a
 // richer wire format (jsonl, etc.) substitute their own Fanout-shaped
 // writer at the consumer layer — this is just the default tee.
-func encodeStreamEvent(ev provider.StreamEvent) ([]byte, bool) {
+func encodeStreamEvent(ev llmtypes.StreamEvent) ([]byte, bool) {
 	switch ev.Type {
-	case provider.EventDelta:
+	case llmtypes.EventDelta:
 		if ev.Content == "" {
 			return nil, false
 		}
 		return []byte(ev.Content), true
-	case provider.EventToolUse:
+	case llmtypes.EventToolUse:
 		if ev.ToolUse == nil {
 			return nil, false
 		}
 		return []byte(fmt.Sprintf("\n[tool_use:%s]\n", ev.ToolUse.Name)), true
-	case provider.EventError:
+	case llmtypes.EventError:
 		return []byte(fmt.Sprintf("\n[error] %s\n", ev.Error)), true
-	case provider.EventDone:
+	case llmtypes.EventDone:
 		return []byte("\n[turn_done]\n"), true
 	}
 	return nil, false

@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	llmtypes "github.com/hollis-labs/go-llm-types"
 	"github.com/hollis-labs/go-providers/provider"
 )
 
@@ -441,7 +442,7 @@ func TestPTYResourceLimits_CPUTime_TerminatesCPUBound(t *testing.T) {
 	dir := t.TempDir()
 
 	rt, _ := NewFromAdapter(AdapterRuntimeConfig{
-		ID:      "pty-cpulimit",
+		ID: "pty-cpulimit",
 		Adapter: &fixedBinaryAdapter{
 			binary: shPath,
 			// Tight busy-loop with no I/O — burns CPU until RLIMIT_CPU.
@@ -711,9 +712,11 @@ type fixedBinaryAdapter struct {
 	args   []string
 }
 
-func (a *fixedBinaryAdapter) Name() string                                            { return "fixed-binary-test" }
-func (a *fixedBinaryAdapter) Detect() (string, bool)                                  { return a.binary, a.binary != "" }
-func (a *fixedBinaryAdapter) BuildArgs(_, _, _ string) []string                       { return append([]string(nil), a.args...) }
-func (a *fixedBinaryAdapter) ParseLine(_ []byte) ([]provider.StreamEvent, error)      { return nil, nil }
+func (a *fixedBinaryAdapter) Name() string           { return "fixed-binary-test" }
+func (a *fixedBinaryAdapter) Detect() (string, bool) { return a.binary, a.binary != "" }
+func (a *fixedBinaryAdapter) BuildArgs(_, _, _ string) []string {
+	return append([]string(nil), a.args...)
+}
+func (a *fixedBinaryAdapter) ParseLine(_ []byte) ([]llmtypes.StreamEvent, error) { return nil, nil }
 
 var _ provider.CLIAdapter = (*fixedBinaryAdapter)(nil)

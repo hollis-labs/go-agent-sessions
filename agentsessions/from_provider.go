@@ -7,7 +7,8 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/hollis-labs/go-providers/provider"
+	llmcontracts "github.com/hollis-labs/go-llm-contracts"
+	llmtypes "github.com/hollis-labs/go-llm-types"
 )
 
 // ProviderRuntimeConfig configures a Runtime backed by a
@@ -24,7 +25,7 @@ type ProviderRuntimeConfig struct {
 	Kind string
 
 	// Provider is the go-providers Provider to drive. Required.
-	Provider provider.Provider
+	Provider llmcontracts.Provider
 
 	// Caps declares the static capability set. Default zero value
 	// declares no capabilities.
@@ -91,7 +92,7 @@ func (r *providerRuntime) Start(ctx context.Context, opts StartOptions) (Session
 	return s, nil
 }
 
-// providerSession turns a provider.Provider into a Session. SendInput
+// providerSession turns a llmcontracts.Provider into a Session. SendInput
 // appends a user message and drives StreamChat; turn ends when the
 // stream channel closes.
 type providerSession struct {
@@ -104,7 +105,7 @@ type providerSession struct {
 	turnID atomic.Value // string
 
 	mu       sync.Mutex
-	messages []provider.ChatMessage
+	messages []llmtypes.ChatMessage
 
 	turnInFlight atomic.Bool
 
@@ -137,8 +138,8 @@ func (s *providerSession) SendInput(ctx context.Context, data []byte) error {
 	defer s.turnInFlight.Store(false)
 
 	s.mu.Lock()
-	s.messages = append(s.messages, provider.ChatMessage{Role: "user", Content: string(data)})
-	msgs := append([]provider.ChatMessage(nil), s.messages...)
+	s.messages = append(s.messages, llmtypes.ChatMessage{Role: "user", Content: string(data)})
+	msgs := append([]llmtypes.ChatMessage(nil), s.messages...)
 	s.mu.Unlock()
 
 	turnID := defaultIDFn()
@@ -146,7 +147,7 @@ func (s *providerSession) SendInput(ctx context.Context, data []byte) error {
 	s.state.Store(int32(LiveStateProcessing))
 	defer s.state.Store(int32(LiveStateIdle))
 
-	req := provider.ChatRequest{
+	req := llmtypes.ChatRequest{
 		Model:        s.runtime.cfg.Model,
 		SystemPrompt: s.system,
 		Messages:     msgs,
@@ -160,17 +161,17 @@ func (s *providerSession) SendInput(ctx context.Context, data []byte) error {
 	for ev := range stream {
 		tryEventFanout(s.opts.EventFanout, ev)
 		switch ev.Type {
-		case provider.EventDelta:
+		case llmtypes.EventDelta:
 			assistant += ev.Content
 			if s.opts.Fanout != nil {
 				_, _ = s.opts.Fanout.Write([]byte(ev.Content))
 			}
-		case provider.EventError:
+		case llmtypes.EventError:
 			if s.opts.Fanout != nil {
 				_, _ = s.opts.Fanout.Write([]byte(fmt.Sprintf("\n[error] %s\n", ev.Error)))
 			}
 			return errors.New(ev.Error)
-		case provider.EventDone:
+		case llmtypes.EventDone:
 			if s.opts.Fanout != nil {
 				_, _ = s.opts.Fanout.Write([]byte("\n[turn_done]\n"))
 			}
@@ -179,7 +180,7 @@ func (s *providerSession) SendInput(ctx context.Context, data []byte) error {
 
 	if assistant != "" {
 		s.mu.Lock()
-		s.messages = append(s.messages, provider.ChatMessage{Role: "assistant", Content: assistant})
+		s.messages = append(s.messages, llmtypes.ChatMessage{Role: "assistant", Content: assistant})
 		s.mu.Unlock()
 	}
 	return nil

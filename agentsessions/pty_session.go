@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/creack/pty"
+	llmtypes "github.com/hollis-labs/go-llm-types"
 	"github.com/hollis-labs/go-providers/provider"
 	pevents "github.com/hollis-labs/go-providers/provider/events"
 	"github.com/hollis-labs/go-sandbox/sandbox"
@@ -347,7 +348,7 @@ func (s *ptySession) runReaderLoop(ptmx *os.File) {
 		// on the supervised path.
 		if evs, perr := s.runtime.cfg.Adapter.ParseLine(raw); perr == nil {
 			for _, ev := range evs {
-				if ev.Type == provider.EventSessionID && ev.SessionID != "" {
+				if ev.Type == llmtypes.EventSessionID && ev.SessionID != "" {
 					s.lastSessionID.Store(ev.SessionID)
 					if s.opts.OnSessionID != nil {
 						s.opts.OnSessionID(ev.SessionID)

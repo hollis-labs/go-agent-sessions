@@ -15,19 +15,19 @@ import (
 	"strings"
 
 	"github.com/hollis-labs/go-agent-sessions/agentsessions"
-	"github.com/hollis-labs/go-providers/provider"
+	llmtypes "github.com/hollis-labs/go-llm-types"
 )
 
 // echoAdapter is a stand-in CLIAdapter for the example. It treats
 // stdout lines as opaque text and emits a single delta per line.
 type echoAdapter struct{}
 
-func (echoAdapter) Name() string                                 { return "echo" }
-func (echoAdapter) BuildArgs(prompt, _, _ string) []string       { return []string{prompt} }
-func (echoAdapter) Detect() (string, bool)                       { return "/bin/echo", true }
-func (echoAdapter) ParseLine(line []byte) ([]provider.StreamEvent, error) {
+func (echoAdapter) Name() string                           { return "echo" }
+func (echoAdapter) BuildArgs(prompt, _, _ string) []string { return []string{prompt} }
+func (echoAdapter) Detect() (string, bool)                 { return "/bin/echo", true }
+func (echoAdapter) ParseLine(line []byte) ([]llmtypes.StreamEvent, error) {
 	s := strings.TrimRight(string(line), "\r\n")
-	return []provider.StreamEvent{{Type: provider.EventDelta, Content: s}}, nil
+	return []llmtypes.StreamEvent{{Type: llmtypes.EventDelta, Content: s}}, nil
 }
 
 func main() {

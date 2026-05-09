@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hollis-labs/go-providers/provider"
+	llmtypes "github.com/hollis-labs/go-llm-types"
 	"github.com/hollis-labs/go-sandbox/sandbox"
 )
 
@@ -39,18 +39,18 @@ func (a *echoAdapter) BuildArgs(prompt, _, sessionID string) []string {
 	return []string{}
 }
 
-func (a *echoAdapter) ParseLine(line []byte) ([]provider.StreamEvent, error) {
+func (a *echoAdapter) ParseLine(line []byte) ([]llmtypes.StreamEvent, error) {
 	// Trim only CR/LF (the runner's bufio.Scanner already strips the
 	// trailing newline, but we defensively cover \r). Do not TrimSpace —
 	// that would eat trailing spaces in delta content.
 	s := strings.TrimRight(string(line), "\r\n")
 	switch {
 	case strings.HasPrefix(s, "delta:"):
-		return []provider.StreamEvent{{Type: provider.EventDelta, Content: strings.TrimPrefix(s, "delta:")}}, nil
+		return []llmtypes.StreamEvent{{Type: llmtypes.EventDelta, Content: strings.TrimPrefix(s, "delta:")}}, nil
 	case strings.HasPrefix(s, "session:"):
-		return []provider.StreamEvent{{Type: provider.EventSessionID, SessionID: strings.TrimPrefix(s, "session:")}}, nil
+		return []llmtypes.StreamEvent{{Type: llmtypes.EventSessionID, SessionID: strings.TrimPrefix(s, "session:")}}, nil
 	case s == "done":
-		return []provider.StreamEvent{{Type: provider.EventDone}}, nil
+		return []llmtypes.StreamEvent{{Type: llmtypes.EventDone}}, nil
 	}
 	return nil, nil
 }
@@ -498,7 +498,7 @@ func TestStartOptions_EventFanout_DeliversToBothFanouts(t *testing.T) {
 	}
 
 	var fanout bytes.Buffer
-	eventCh := make(chan provider.StreamEvent, 8)
+	eventCh := make(chan llmtypes.StreamEvent, 8)
 	sess, err := rt.Start(context.Background(), StartOptions{
 		Workdir:     dir,
 		Fanout:      &fanout,
@@ -513,10 +513,10 @@ func TestStartOptions_EventFanout_DeliversToBothFanouts(t *testing.T) {
 		t.Fatalf("SendInput: %v", err)
 	}
 
-	want := []provider.StreamEvent{
-		{Type: provider.EventSessionID, SessionID: "ses_abc123"},
-		{Type: provider.EventDelta, Content: "hello"},
-		{Type: provider.EventDone},
+	want := []llmtypes.StreamEvent{
+		{Type: llmtypes.EventSessionID, SessionID: "ses_abc123"},
+		{Type: llmtypes.EventDelta, Content: "hello"},
+		{Type: llmtypes.EventDone},
 	}
 	if got := takeEvents(eventCh, len(want)); !reflect.DeepEqual(got, want) {
 		t.Fatalf("EventFanout events = %#v, want %#v", got, want)
@@ -542,7 +542,7 @@ func TestStartOptions_EventFanout_NilByteFanout_StillWorks(t *testing.T) {
 		t.Fatalf("NewFromAdapter: %v", err)
 	}
 
-	eventCh := make(chan provider.StreamEvent, 8)
+	eventCh := make(chan llmtypes.StreamEvent, 8)
 	sess, err := rt.Start(context.Background(), StartOptions{
 		Workdir:     dir,
 		EventFanout: eventCh,
@@ -556,10 +556,10 @@ func TestStartOptions_EventFanout_NilByteFanout_StillWorks(t *testing.T) {
 		t.Fatalf("SendInput: %v", err)
 	}
 
-	want := []provider.StreamEvent{
-		{Type: provider.EventSessionID, SessionID: "ses_onlytyped"},
-		{Type: provider.EventDelta, Content: "typed-only"},
-		{Type: provider.EventDone},
+	want := []llmtypes.StreamEvent{
+		{Type: llmtypes.EventSessionID, SessionID: "ses_onlytyped"},
+		{Type: llmtypes.EventDelta, Content: "typed-only"},
+		{Type: llmtypes.EventDone},
 	}
 	if got := takeEvents(eventCh, len(want)); !reflect.DeepEqual(got, want) {
 		t.Fatalf("EventFanout events = %#v, want %#v", got, want)
@@ -583,7 +583,7 @@ func TestStartOptions_EventFanout_SlowConsumer_DropsNotBlocks(t *testing.T) {
 		t.Fatalf("NewFromAdapter: %v", err)
 	}
 
-	eventCh := make(chan provider.StreamEvent, 1)
+	eventCh := make(chan llmtypes.StreamEvent, 1)
 	sess, err := rt.Start(context.Background(), StartOptions{
 		Workdir:     dir,
 		EventFanout: eventCh,
@@ -647,8 +647,8 @@ func TestStartOptions_EventFanout_NilPreservesV010Behavior(t *testing.T) {
 	}
 }
 
-func takeEvents(ch <-chan provider.StreamEvent, n int) []provider.StreamEvent {
-	out := make([]provider.StreamEvent, 0, n)
+func takeEvents(ch <-chan llmtypes.StreamEvent, n int) []llmtypes.StreamEvent {
+	out := make([]llmtypes.StreamEvent, 0, n)
 	for i := 0; i < n; i++ {
 		select {
 		case ev := <-ch:
@@ -660,8 +660,8 @@ func takeEvents(ch <-chan provider.StreamEvent, n int) []provider.StreamEvent {
 	return out
 }
 
-func drainEvents(ch <-chan provider.StreamEvent) []provider.StreamEvent {
-	var out []provider.StreamEvent
+func drainEvents(ch <-chan llmtypes.StreamEvent) []llmtypes.StreamEvent {
+	var out []llmtypes.StreamEvent
 	for {
 		select {
 		case ev := <-ch:

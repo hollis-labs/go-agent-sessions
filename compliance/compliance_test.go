@@ -9,7 +9,7 @@ import (
 
 	"github.com/hollis-labs/go-agent-sessions/agentsessions"
 	"github.com/hollis-labs/go-agent-sessions/compliance"
-	"github.com/hollis-labs/go-providers/provider"
+	llmtypes "github.com/hollis-labs/go-llm-types"
 )
 
 // echoAdapter mirrors the test fixture in the agentsessions package — a
@@ -22,15 +22,15 @@ func (a *echoAdapter) Name() string { return "echo-test" }
 func (a *echoAdapter) BuildArgs(_, _, _ string) []string {
 	return []string{}
 }
-func (a *echoAdapter) ParseLine(line []byte) ([]provider.StreamEvent, error) {
+func (a *echoAdapter) ParseLine(line []byte) ([]llmtypes.StreamEvent, error) {
 	s := strings.TrimRight(string(line), "\r\n")
 	switch {
 	case strings.HasPrefix(s, "delta:"):
-		return []provider.StreamEvent{{Type: provider.EventDelta, Content: strings.TrimPrefix(s, "delta:")}}, nil
+		return []llmtypes.StreamEvent{{Type: llmtypes.EventDelta, Content: strings.TrimPrefix(s, "delta:")}}, nil
 	case strings.HasPrefix(s, "session:"):
-		return []provider.StreamEvent{{Type: provider.EventSessionID, SessionID: strings.TrimPrefix(s, "session:")}}, nil
+		return []llmtypes.StreamEvent{{Type: llmtypes.EventSessionID, SessionID: strings.TrimPrefix(s, "session:")}}, nil
 	case s == "done":
-		return []provider.StreamEvent{{Type: provider.EventDone}}, nil
+		return []llmtypes.StreamEvent{{Type: llmtypes.EventDone}}, nil
 	}
 	return nil, nil
 }

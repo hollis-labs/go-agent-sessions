@@ -116,9 +116,9 @@ type fakeRuntime struct {
 	kind string
 	caps Capabilities
 
-	mu       sync.Mutex
-	last     *fakeSession
-	startErr error
+	mu         sync.Mutex
+	last       *fakeSession
+	startErr   error
 	prepareErr error
 
 	// pid counter for sessions
@@ -254,10 +254,10 @@ func (b *syncBuf) String() string {
 // errStartRuntime is a Runtime whose Start always errors.
 type errStartRuntime struct{ err error }
 
-func (r errStartRuntime) ID() string                                { return "err" }
-func (r errStartRuntime) Kind() string                              { return "fake" }
-func (r errStartRuntime) Caps() Capabilities                        { return Capabilities{} }
-func (r errStartRuntime) Prepare(_ context.Context) error           { return nil }
+func (r errStartRuntime) ID() string                      { return "err" }
+func (r errStartRuntime) Kind() string                    { return "fake" }
+func (r errStartRuntime) Caps() Capabilities              { return Capabilities{} }
+func (r errStartRuntime) Prepare(_ context.Context) error { return nil }
 func (r errStartRuntime) Start(_ context.Context, _ StartOptions) (Session, error) {
 	return nil, r.err
 }

@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hollis-labs/go-providers/provider"
+	llmtypes "github.com/hollis-labs/go-llm-types"
 	pevents "github.com/hollis-labs/go-providers/provider/events"
 )
 
@@ -21,22 +21,22 @@ import (
 // a stdin line, emit `delta:<line>` then `done`, repeat until EOF.
 //
 // It implements EventParser so the PTY runtime exercises the typed-event
-// fan-out path; ParseLine produces the legacy provider.StreamEvent.
+// fan-out path; ParseLine produces the legacy llmtypes.StreamEvent.
 type ptyEchoAdapter struct {
 	scriptPath string
 }
 
-func (a *ptyEchoAdapter) Name() string                { return "pty-echo-test" }
-func (a *ptyEchoAdapter) Detect() (string, bool)      { return a.scriptPath, a.scriptPath != "" }
+func (a *ptyEchoAdapter) Name() string                      { return "pty-echo-test" }
+func (a *ptyEchoAdapter) Detect() (string, bool)            { return a.scriptPath, a.scriptPath != "" }
 func (a *ptyEchoAdapter) BuildArgs(_, _, _ string) []string { return []string{} }
 
-func (a *ptyEchoAdapter) ParseLine(line []byte) ([]provider.StreamEvent, error) {
+func (a *ptyEchoAdapter) ParseLine(line []byte) ([]llmtypes.StreamEvent, error) {
 	s := strings.TrimRight(string(line), "\r\n")
 	switch {
 	case strings.HasPrefix(s, "delta:"):
-		return []provider.StreamEvent{{Type: provider.EventDelta, Content: strings.TrimPrefix(s, "delta:")}}, nil
+		return []llmtypes.StreamEvent{{Type: llmtypes.EventDelta, Content: strings.TrimPrefix(s, "delta:")}}, nil
 	case s == "done":
-		return []provider.StreamEvent{{Type: provider.EventDone}}, nil
+		return []llmtypes.StreamEvent{{Type: llmtypes.EventDone}}, nil
 	}
 	return nil, nil
 }
@@ -146,7 +146,7 @@ func TestPTYRuntime_FanoutAndEventCallbacks(t *testing.T) {
 	})
 
 	var fanoutBuf syncBuf
-	eventCh := make(chan provider.StreamEvent, 16)
+	eventCh := make(chan llmtypes.StreamEvent, 16)
 	var typedMu sync.Mutex
 	var typed []pevents.Event
 
@@ -185,10 +185,10 @@ func TestPTYRuntime_FanoutAndEventCallbacks(t *testing.T) {
 	streamEvents := drainEvents(eventCh)
 	var sawDelta, sawDone bool
 	for _, ev := range streamEvents {
-		if ev.Type == provider.EventDelta && ev.Content == "alpha" {
+		if ev.Type == llmtypes.EventDelta && ev.Content == "alpha" {
 			sawDelta = true
 		}
-		if ev.Type == provider.EventDone {
+		if ev.Type == llmtypes.EventDone {
 			sawDone = true
 		}
 	}

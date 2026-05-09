@@ -2,9 +2,10 @@
 // over the hollis-labs Go primitive libraries.
 //
 // A Session is the running handle for one agent: turn-based subprocess
-// (driven by go-runner + a provider.CLIAdapter), long-lived PTY (a
-// provider.Provider directly), or HTTP-streamed (a provider.Provider
-// directly). All shapes expose the same Session interface — Wait, Stop,
+// (driven by go-runner + a provider.CLIAdapter), long-lived PTY (an
+// llmcontracts.Provider directly), or HTTP-streamed (an
+// llmcontracts.Provider directly). All shapes expose the same Session
+// interface — Wait, Stop,
 // SendInput, Resize, Health, CheckpointHints — so consumers (agent-mux,
 // clockwork, nanite) can drive any of them uniformly.
 //
@@ -14,9 +15,10 @@
 //
 // # Composition
 //
-//   - go-providers — provider.Provider (long-lived, e.g. PTY/HTTP) or
-//     provider.CLIAdapter (per-turn subprocess parsing). The library wraps
-//     each shape into a Session via NewFromProvider / NewFromAdapter.
+//   - go-providers / go-llm-contracts — llmcontracts.Provider (long-lived,
+//     e.g. PTY/HTTP) or provider.CLIAdapter (per-turn subprocess parsing).
+//     The library wraps each shape into a Session via NewFromProvider /
+//     NewFromAdapter.
 //   - go-runner — runner.Run drives the per-turn subprocess case.
 //   - go-sandbox — sandbox.Profile travels via StartOptions.Profile and is
 //     applied by go-runner under the hood.

@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 
+	llmtypes "github.com/hollis-labs/go-llm-types"
 	"github.com/hollis-labs/go-providers/provider"
 	"github.com/hollis-labs/go-sandbox/sandbox"
 )
@@ -141,7 +142,7 @@ type PIDReporter interface {
 // output stream so the Manager can broadcast to attach subscribers — CLI
 // runtimes tee PTY bytes / parsed event lines into it; API runtimes
 // forward streamed assistant tokens. EventFanout, when non-nil, receives
-// the parsed provider.StreamEvent values alongside the byte Fanout.
+// the parsed llmtypes.StreamEvent values alongside the byte Fanout.
 type StartOptions struct {
 	// Workdir is the absolute path used as the spawned process's working
 	// directory and as the workspace argument to sandbox.Apply.
@@ -207,12 +208,12 @@ type StartOptions struct {
 	// by the Manager — adapters do not allocate this.
 	Fanout io.Writer
 
-	// EventFanout receives parsed provider.StreamEvent values as a
+	// EventFanout receives parsed llmtypes.StreamEvent values as a
 	// best-effort mirror of the session stream. Sends are non-blocking;
 	// when the channel is full the event is dropped silently. Callers
 	// should supply a buffered channel sized to their consumer's
 	// tolerance and must not close it before the session is done.
-	EventFanout chan<- provider.StreamEvent
+	EventFanout chan<- llmtypes.StreamEvent
 
 	// SessionIDPreset, when non-empty, is the provider-side session id
 	// the adapter should use as `--resume <id>` on the very first turn.
@@ -264,7 +265,7 @@ type StartOptions struct {
 
 	// TypedEventCallback, when non-nil, receives parsed typed events
 	// (provider/events.Event) from the runtime. Mirrors the existing
-	// EventFanout chan<- provider.StreamEvent surface but uses go-providers
+	// EventFanout chan<- llmtypes.StreamEvent surface but uses go-providers
 	// Tier-2 typed events: callers see events.Delta / events.ToolUse /
 	// events.ToolResult / events.SubagentSpawn / events.SessionID /
 	// events.Done / events.Error / events.Heartbeat / events.Thinking.

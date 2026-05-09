@@ -8,19 +8,19 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hollis-labs/go-providers/provider"
+	llmtypes "github.com/hollis-labs/go-llm-types"
 )
 
 type fakeProvider struct {
-	events []provider.StreamEvent
+	events []llmtypes.StreamEvent
 	err    error
 }
 
-func (p *fakeProvider) StreamChat(ctx context.Context, req provider.ChatRequest) (<-chan provider.StreamEvent, error) {
+func (p *fakeProvider) StreamChat(ctx context.Context, req llmtypes.ChatRequest) (<-chan llmtypes.StreamEvent, error) {
 	if p.err != nil {
 		return nil, p.err
 	}
-	ch := make(chan provider.StreamEvent, len(p.events))
+	ch := make(chan llmtypes.StreamEvent, len(p.events))
 	go func() {
 		defer close(ch)
 		for _, ev := range p.events {
@@ -34,22 +34,22 @@ func (p *fakeProvider) StreamChat(ctx context.Context, req provider.ChatRequest)
 	return ch, nil
 }
 
-func (p *fakeProvider) Complete(ctx context.Context, req provider.ChatRequest) (string, error) {
+func (p *fakeProvider) Complete(ctx context.Context, req llmtypes.ChatRequest) (string, error) {
 	return "", errors.New("not implemented in test")
 }
 
-func (p *fakeProvider) Capabilities() provider.ProviderCapabilities {
-	return provider.ProviderCapabilities{}
+func (p *fakeProvider) Capabilities() llmtypes.ProviderCapabilities {
+	return llmtypes.ProviderCapabilities{}
 }
 
 func TestProviderRuntime_EventFanout_DeliversToBothFanouts(t *testing.T) {
 	rt, err := NewFromProvider(ProviderRuntimeConfig{
 		ID:   "provider-both",
 		Kind: "api",
-		Provider: &fakeProvider{events: []provider.StreamEvent{
-			{Type: provider.EventSessionID, SessionID: "ses_provider"},
-			{Type: provider.EventDelta, Content: "hello"},
-			{Type: provider.EventDone},
+		Provider: &fakeProvider{events: []llmtypes.StreamEvent{
+			{Type: llmtypes.EventSessionID, SessionID: "ses_provider"},
+			{Type: llmtypes.EventDelta, Content: "hello"},
+			{Type: llmtypes.EventDone},
 		}},
 	})
 	if err != nil {
@@ -57,7 +57,7 @@ func TestProviderRuntime_EventFanout_DeliversToBothFanouts(t *testing.T) {
 	}
 
 	var fanout bytes.Buffer
-	eventCh := make(chan provider.StreamEvent, 8)
+	eventCh := make(chan llmtypes.StreamEvent, 8)
 	sess, err := rt.Start(context.Background(), StartOptions{
 		Workdir:     t.TempDir(),
 		Fanout:      &fanout,
@@ -72,10 +72,10 @@ func TestProviderRuntime_EventFanout_DeliversToBothFanouts(t *testing.T) {
 		t.Fatalf("SendInput: %v", err)
 	}
 
-	want := []provider.StreamEvent{
-		{Type: provider.EventSessionID, SessionID: "ses_provider"},
-		{Type: provider.EventDelta, Content: "hello"},
-		{Type: provider.EventDone},
+	want := []llmtypes.StreamEvent{
+		{Type: llmtypes.EventSessionID, SessionID: "ses_provider"},
+		{Type: llmtypes.EventDelta, Content: "hello"},
+		{Type: llmtypes.EventDone},
 	}
 	if got := takeEvents(eventCh, len(want)); !reflect.DeepEqual(got, want) {
 		t.Fatalf("EventFanout events = %#v, want %#v", got, want)
@@ -89,16 +89,16 @@ func TestProviderRuntime_EventFanout_NilByteFanout_StillWorks(t *testing.T) {
 	rt, err := NewFromProvider(ProviderRuntimeConfig{
 		ID:   "provider-typed-only",
 		Kind: "api",
-		Provider: &fakeProvider{events: []provider.StreamEvent{
-			{Type: provider.EventUsage, Usage: &provider.Usage{OutputTokens: 5}},
-			{Type: provider.EventDone},
+		Provider: &fakeProvider{events: []llmtypes.StreamEvent{
+			{Type: llmtypes.EventUsage, Usage: &llmtypes.Usage{OutputTokens: 5}},
+			{Type: llmtypes.EventDone},
 		}},
 	})
 	if err != nil {
 		t.Fatalf("NewFromProvider: %v", err)
 	}
 
-	eventCh := make(chan provider.StreamEvent, 8)
+	eventCh := make(chan llmtypes.StreamEvent, 8)
 	sess, err := rt.Start(context.Background(), StartOptions{
 		Workdir:     t.TempDir(),
 		EventFanout: eventCh,
@@ -112,9 +112,9 @@ func TestProviderRuntime_EventFanout_NilByteFanout_StillWorks(t *testing.T) {
 		t.Fatalf("SendInput: %v", err)
 	}
 
-	want := []provider.StreamEvent{
-		{Type: provider.EventUsage, Usage: &provider.Usage{OutputTokens: 5}},
-		{Type: provider.EventDone},
+	want := []llmtypes.StreamEvent{
+		{Type: llmtypes.EventUsage, Usage: &llmtypes.Usage{OutputTokens: 5}},
+		{Type: llmtypes.EventDone},
 	}
 	if got := takeEvents(eventCh, len(want)); !reflect.DeepEqual(got, want) {
 		t.Fatalf("EventFanout events = %#v, want %#v", got, want)
@@ -125,18 +125,18 @@ func TestProviderRuntime_EventFanout_SlowConsumer_DropsNotBlocks(t *testing.T) {
 	rt, err := NewFromProvider(ProviderRuntimeConfig{
 		ID:   "provider-slow",
 		Kind: "api",
-		Provider: &fakeProvider{events: []provider.StreamEvent{
-			{Type: provider.EventDelta, Content: "one"},
-			{Type: provider.EventDelta, Content: "two"},
-			{Type: provider.EventDelta, Content: "three"},
-			{Type: provider.EventDone},
+		Provider: &fakeProvider{events: []llmtypes.StreamEvent{
+			{Type: llmtypes.EventDelta, Content: "one"},
+			{Type: llmtypes.EventDelta, Content: "two"},
+			{Type: llmtypes.EventDelta, Content: "three"},
+			{Type: llmtypes.EventDone},
 		}},
 	})
 	if err != nil {
 		t.Fatalf("NewFromProvider: %v", err)
 	}
 
-	eventCh := make(chan provider.StreamEvent, 1)
+	eventCh := make(chan llmtypes.StreamEvent, 1)
 	sess, err := rt.Start(context.Background(), StartOptions{
 		Workdir:     t.TempDir(),
 		EventFanout: eventCh,
@@ -170,10 +170,10 @@ func TestProviderRuntime_EventFanout_NilPreservesV010Behavior(t *testing.T) {
 	rt, err := NewFromProvider(ProviderRuntimeConfig{
 		ID:   "provider-nil",
 		Kind: "api",
-		Provider: &fakeProvider{events: []provider.StreamEvent{
-			{Type: provider.EventDelta, Content: "hello"},
-			{Type: provider.EventDelta, Content: " world"},
-			{Type: provider.EventDone},
+		Provider: &fakeProvider{events: []llmtypes.StreamEvent{
+			{Type: llmtypes.EventDelta, Content: "hello"},
+			{Type: llmtypes.EventDelta, Content: " world"},
+			{Type: llmtypes.EventDone},
 		}},
 	})
 	if err != nil {

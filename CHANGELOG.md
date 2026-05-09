@@ -2,6 +2,59 @@
 
 All notable changes to `go-agent-sessions` are documented in this file. Per-release notes are also published as GitHub Releases.
 
+## v0.7.1 — 2026-05-09
+
+`go-providers` v0.12.0 compatibility migration. Consumer-side patch
+release — no public-API breakage at the `agentsessions` boundary;
+internal imports moved to `go-llm-types` / `go-llm-contracts`.
+
+### Dependency bumps
+
+- `github.com/hollis-labs/go-providers`: v0.8.0 → v0.12.0
+- `github.com/hollis-labs/go-runner`: v0.3.0 → v0.4.0
+- Added `github.com/hollis-labs/go-llm-types` v0.1.0
+- Added `github.com/hollis-labs/go-llm-contracts` v0.1.0
+
+### Internal migration (no consumer-facing API changes)
+
+`go-providers` v0.12.0 dropped the transitional aliases for the LLM
+type model. References across `agentsessions/`, `compliance/`, and
+`examples/` migrated to canonical homes:
+
+- `provider.StreamEvent`, `ChatMessage`, `ChatRequest`, `Usage`,
+  `ProviderCapabilities`, and the `Event*` constants
+  (`EventDelta`, `EventDone`, `EventError`, `EventToolUse`,
+  `EventUsage`, `EventSessionID`) → `llmtypes.X`.
+- `provider.Provider` (the long-lived provider interface) →
+  `llmcontracts.Provider`.
+- `provider.CLIAdapter`, `provider.EventParser`, and
+  `provider.EventsCallback` continue to live in `go-providers`
+  (CLI/PTY/subprocess surface) and are unchanged.
+
+### Public API surface
+
+The `Session` interface, `StartOptions`, `Manager`, `NewFromAdapter`,
+and `NewFromProvider` signatures are unchanged at the
+`agentsessions` package level. Consumers passing
+`go-providers`-constructed values get the migration transparently.
+Consumers implementing their own provider/adapter must move to the
+canonical type homes (a one-shot perl + goimports sweep — see
+implementer report).
+
+### Verification
+
+- darwin host: `go vet ./...`, `go build ./...`,
+  `go test -race -count=1 ./...` — green.
+- Race-stress (per `go-agent-sessions`'s convention for supervisor /
+  PTY runtime tests): `go test -race -count=10 -run "Pty|Supervisor|Manager_WaitSession" ./agentsessions/...` — flake-free.
+
+### Origin
+
+Migration session:
+`agent-workspaces/execution/portfolio/2026-05-09-go-providers-v0.12.0-compat/`.
+Driven by SP-20260508-0001 Path B sweep (nanite commit `00f0f9e`)
+which dropped the transitional aliases in `go-providers` v0.12.0.
+
 ## v0.7.0 — 2026-05-08
 
 `Manager.WaitSession` now propagates the underlying `Session.Wait` error verbatim. Supervised PTY non-clean exits surface as `*ExitError` (extractable via `errors.As`); when the supervisor itself triggered the kill, `ExitError.Cause` classifies the termination as `idle_timeout / watchdog_kill / restart_exhausted / oom_kill / resource_limit`. For ordinary non-zero exits or Stop/ctx-cancel under supervision, `*ExitError` is still returned but `Cause` is empty (the supervisor didn't drive the termination). Recovery brokers and post-mortem hooks can classify terminations without a side-channel.

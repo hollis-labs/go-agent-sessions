@@ -34,7 +34,7 @@ import (
 	"time"
 
 	"github.com/hollis-labs/go-agent-sessions/agentsessions"
-	"github.com/hollis-labs/go-providers/provider"
+	llmtypes "github.com/hollis-labs/go-llm-types"
 )
 
 // Harness configures a compliance run for one Runtime.
@@ -206,7 +206,7 @@ func runBaseline(t *testing.T, rt agentsessions.Runtime, opts startOptsFn, binar
 			t.Skip("BinarySkip=true: binary not available")
 		}
 		o := opts(t)
-		ch := make(chan provider.StreamEvent, 8)
+		ch := make(chan llmtypes.StreamEvent, 8)
 		o.EventFanout = ch
 		sess := mustStart(t, rt, o)
 		defer func() { _ = sess.Stop(context.Background()) }()
