@@ -3,8 +3,7 @@
 // by a sync.RWMutex and watch goroutines cooperate via a WaitGroup so
 // Shutdown blocks until terminal states are recorded.
 //
-// Adapted from agent-mux/internal/runtime/manager.go (ADR 0004 +
-// internal contract). Differences from the source:
+// Adapted from agent-mux's runtime manager. Differences from the source:
 //   - State enum is the library's four-value process-level set (consumer
 //     domain FSMs map on top).
 //   - Sinks are interfaces (StateSink, AttachmentSink, EventSink) — the

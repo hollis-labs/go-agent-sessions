@@ -21,8 +21,8 @@
 // tests requiring real binary behavior are skipped with an explicit
 // t.Skip message.
 //
-// Adapted verbatim from agent-mux/internal/provider/compliance/
-// compliance.go (ADR 0025), adjusted to the library's renamed types.
+// Adapted verbatim from agent-mux's provider compliance suite, adjusted
+// to the library's renamed types.
 package compliance
 
 import (

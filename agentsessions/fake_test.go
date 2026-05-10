@@ -13,7 +13,7 @@ import (
 // lifecycle and attach broker. complete(code) unblocks Wait; emit(b)
 // pushes bytes to the Fanout writer the Manager records at Start time.
 //
-// Adapted from agent-mux/internal/runtime/manager_test.go.
+// Adapted from agent-mux's runtime manager test fakes.
 type fakeSession struct {
 	pid    int
 	done   chan struct{}

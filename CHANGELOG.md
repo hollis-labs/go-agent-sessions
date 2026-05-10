@@ -2,6 +2,33 @@
 
 All notable changes to `go-agent-sessions` are documented in this file. Per-release notes are also published as GitHub Releases.
 
+## v0.7.2 — 2026-05-10
+
+Public-release prep. No public Go API changes vs v0.7.1.
+
+### Documentation
+
+- README, CHANGELOG, and in-source godoc cleaned up for OSS publication:
+  internal-tooling references (workspace paths, ticket IDs, internal
+  decision IDs) dropped; mentions of downstream consumers (`agent-mux`,
+  `clockwork`, `nanite`) retained as illustrative integration examples.
+- Added `.gitignore` covering Go build artifacts, editor noise, local
+  env files, and internal-agent tooling files (`.claude/`, `.agentrc/`,
+  `.nanite/`, `CLAUDE.md`, `AGENTS.md`, `AUDIT_RESULTS.md`).
+
+### Module hygiene
+
+- `go.mod`: `github.com/hollis-labs/go-llm-types` and
+  `github.com/hollis-labs/go-llm-contracts` promoted from `// indirect`
+  to direct requires (the `examples/runner_session/` example imports
+  `llmtypes` directly).
+- `go mod tidy`, `go vet ./...`, `GOOS=linux go vet ./...`,
+  `gofmt -l .` all clean.
+- `go test -race -count=1 -timeout 240s ./...` — green.
+- `govulncheck ./...` — no vulnerabilities affecting library code.
+- `examples/runner_session/main.go` builds and runs end-to-end against
+  the manager surface.
+
 ## v0.7.1 — 2026-05-09
 
 `go-providers` v0.12.0 compatibility migration. Consumer-side patch
@@ -38,8 +65,7 @@ and `NewFromProvider` signatures are unchanged at the
 `agentsessions` package level. Consumers passing
 `go-providers`-constructed values get the migration transparently.
 Consumers implementing their own provider/adapter must move to the
-canonical type homes (a one-shot perl + goimports sweep — see
-implementer report).
+canonical type homes (a one-shot perl + goimports sweep).
 
 ### Verification
 
@@ -50,16 +76,13 @@ implementer report).
 
 ### Origin
 
-Migration session:
-`agent-workspaces/execution/portfolio/2026-05-09-go-providers-v0.12.0-compat/`.
-Driven by SP-20260508-0001 Path B sweep (nanite commit `00f0f9e`)
-which dropped the transitional aliases in `go-providers` v0.12.0.
+Driven by the `go-providers` v0.12.0 release, which dropped the
+transitional `provider.X` aliases for the new `go-llm-types` /
+`go-llm-contracts` homes.
 
 ## v0.7.0 — 2026-05-08
 
 `Manager.WaitSession` now propagates the underlying `Session.Wait` error verbatim. Supervised PTY non-clean exits surface as `*ExitError` (extractable via `errors.As`); when the supervisor itself triggered the kill, `ExitError.Cause` classifies the termination as `idle_timeout / watchdog_kill / restart_exhausted / oom_kill / resource_limit`. For ordinary non-zero exits or Stop/ctx-cancel under supervision, `*ExitError` is still returned but `Cause` is empty (the supervisor didn't drive the termination). Recovery brokers and post-mortem hooks can classify terminations without a side-channel.
-
-Authoritative implementer prompt + report: `agent-workspaces/execution/go-agent-sessions/2026-05-08-exit-error-propagation/`. Surfaced during clockwork CW-20260508-0002 review (`agent-workspaces/execution/clockwork-manifold/agentic-execution-flow/2026-05-08/implementer-report-agent-boot-tests.md`).
 
 ### Behavior change
 
@@ -78,9 +101,7 @@ Authoritative implementer prompt + report: `agent-workspaces/execution/go-agent-
 
 ## v0.6.0 — 2026-05-08
 
-PTY supervision and OS-level resource limits land natively on the long-lived PTY runtime. The v0.5.0 deferred wiring is now implemented per the path the v0.5.0 implementer flagged: a PTY-native restart loop wrapping `cmd.Wait`, with idle-kill / watchdog goroutines observing ptmx I/O directly — no retrofit of `go-runner.Supervisor` (the impedance mismatch with `creack/pty.Start` is unchanged from the v0.5.0 analysis).
-
-Authoritative cross-app design: `agent-workspaces/planning/agent-boot-unification/2026-05-07-cross-app-design.md` §10 (lib gaps) + the v0.6.0 implementer prompt at `agent-workspaces/execution/go-agent-sessions/2026-05-08-supervision/`.
+PTY supervision and OS-level resource limits land natively on the long-lived PTY runtime. The v0.5.0 deferred wiring is now implemented as a PTY-native restart loop wrapping `cmd.Wait`, with idle-kill / watchdog goroutines observing ptmx I/O directly — no retrofit of `go-runner.Supervisor` (the impedance mismatch with `creack/pty.Start` is unchanged from the v0.5.0 analysis).
 
 ### Public API additions
 
@@ -117,22 +138,20 @@ Authoritative cross-app design: `agent-workspaces/planning/agent-boot-unificatio
 
 - **Adapter-path Supervisor/ResourceLimits forwarding.** Blocked on go-runner publishing v0.3.0's supervision API. v0.6.x increment.
 - **`events.Heartbeat` lib-side synthesis.** Adapter responsibility — the lib does not synthesize.
-- **Recovery broker integration** (nanite's D-SUBAGENT-RECOVERY-BROKER). App-internal pattern; the lib provides the supervision hooks (`OnRestart`, `ExitError.Cause`), the app builds the broker.
+- **Recovery broker integration.** App-internal pattern; the lib provides the supervision hooks (`OnRestart`, `ExitError.Cause`), the app builds its own broker on top.
 - **Live-linux integration tests on a self-hosted runner.** Same as `go-runner` v0.3.0 — gap acknowledged here, not blocking.
 
 ## v0.5.0 — 2026-05-08
 
-Tier 3 of the portfolio agent-boot foundation: long-lived PTY runtime, AutoFireFirstTurn hook, two-dir model (Workdir + WorkspaceDir), capability-driven runtime selection, structured PID propagation across turn boundaries, and an attach-broker stability audit.
+Long-lived PTY runtime, AutoFireFirstTurn hook, two-dir model (Workdir + WorkspaceDir), capability-driven runtime selection, structured PID propagation across turn boundaries, and an attach-broker stability audit.
 
-> **Version note.** Originally drafted as v0.4.0 in the implementer prompt, cut as v0.5.0 because a stale `v0.4.0` tag from 2026-04-27 already pointed at an unrelated commit (`StartOptions.ExtraFiles` passthrough) without an associated release. Skipping `v0.4.0` is cleaner than rewriting tag history.
-
-Authoritative cross-app design: `agent-workspaces/planning/agent-boot-unification/2026-05-07-cross-app-design.md` §9 (PTY analysis, path c) + §10 (lib gaps).
+> **Version note.** Originally drafted as v0.4.0, cut as v0.5.0 because a stale `v0.4.0` tag from 2026-04-27 already pointed at an unrelated commit (`StartOptions.ExtraFiles` passthrough) without an associated release. Skipping `v0.4.0` is cleaner than rewriting tag history.
 
 ### Public API additions
 
 - **Long-lived PTY runtime (path c).** New `ptySession` runtime alongside the existing `adapterSession`. Selected by `NewFromAdapter` when `AdapterRuntimeConfig.Caps.PTY == true` — single entry point routes to the right implementation. Reuses the manager surface uniformly. Pattern lifted from `agent-mux/internal/provider/cli/claudecode/runtime.go` + `agent-mux/internal/session/runtime.go` (RWMutex against ptmx-close-during-use, wait goroutine that nil-clears the master fd, log + fanout tee), generalized so any `provider.CLIAdapter` whose CLI plays well with a long-lived PTY can opt in.
-- **`StartOptions.AutoFireFirstTurn bool` + `StartOptions.FirstTurnPayload []byte`.** When `AutoFireFirstTurn` is true, `Runtime.Start` delivers `FirstTurnPayload` as the first input synchronously before returning — eliminates the Launch/SendInput race that bit consumers (clockwork CW-20260507-0011). Default false preserves existing behavior. PTY runtimes with `BootMode == "stdin"` and a non-empty `BootPrompt` skip the auto-fire (the boot prompt is already in flight via stdin write at Start).
-- **`StartOptions.WorkspaceDir string`.** Two-dir model adopted across the agent-boot portfolio: `Workdir` is the spawned process's cwd; `WorkspaceDir` is the lib's persistent state root. The PTY runtime falls back to `<WorkspaceDir>/logs/session.log` for its log file when `LogPath` is empty. Adapter runtime ignores this field. Zero-value preserves existing behavior.
+- **`StartOptions.AutoFireFirstTurn bool` + `StartOptions.FirstTurnPayload []byte`.** When `AutoFireFirstTurn` is true, `Runtime.Start` delivers `FirstTurnPayload` as the first input synchronously before returning — eliminates the Launch/SendInput race that bit early consumers. Default false preserves existing behavior. PTY runtimes with `BootMode == "stdin"` and a non-empty `BootPrompt` skip the auto-fire (the boot prompt is already in flight via stdin write at Start).
+- **`StartOptions.WorkspaceDir string`.** Two-dir model: `Workdir` is the spawned process's cwd; `WorkspaceDir` is the lib's persistent state root. The PTY runtime falls back to `<WorkspaceDir>/logs/session.log` for its log file when `LogPath` is empty. Adapter runtime ignores this field. Zero-value preserves existing behavior.
 - **`StartOptions.TypedEventCallback provider.EventsCallback`.** Mirrors the existing `EventFanout chan<- provider.StreamEvent` surface but uses go-providers Tier-2 typed events (`events.Delta` / `events.ToolUse` / `events.ToolResult` / `events.SubagentSpawn` / `events.SessionID` / `events.Done` / `events.Error` / `events.Heartbeat` / `events.Thinking`). PTY runtime fires the callback per parsed line via the adapter's `EventParser` interface (or no-op when the adapter doesn't implement it). Adapter runtime continues to fire only legacy `StreamEvent` via `EventFanout` — typed events on the adapter path is a future increment.
 - **`PIDReporter` optional interface.** New `LivePID() / LastPID()` distinction. `LivePID` returns the PID of a process *currently* running, or 0 when no process is active (subprocess-per-turn between turns). `LastPID` is the sticky most-recently-started PID for log correlation. PTY runtimes return the long-lived child PID for both. `Health().PID` continues to track `LivePID`-style semantics — the new interface is for callers who need both.
 
@@ -143,7 +162,7 @@ Authoritative cross-app design: `agent-workspaces/planning/agent-boot-unificatio
 - `false` (default) → subprocess-per-turn `adapterRuntime` (existing behavior, unchanged).
 - `true` → long-lived PTY `ptyRuntime`.
 
-Existing adapters (`Caps.PTY=false`) see no behavior change. The claude-code adapter is the only adapter that opts into PTY initially per the cross-app design; opencode / codex / gemini / aider / junie / copilot stay subprocess-per-turn until they explicitly opt in.
+Existing adapters (`Caps.PTY=false`) see no behavior change. The claude-code adapter is the only adapter that opts into PTY initially; opencode / codex / gemini / aider / junie / copilot stay subprocess-per-turn until they explicitly opt in.
 
 ### Attach broker — public surface frozen
 
@@ -164,11 +183,11 @@ The attach broker behind `Manager.Attach` / `Manager.AttachWith` (in-memory drop
 
 ### Out of scope (deferred)
 
-- `StartOptions.Supervisor` / `StartOptions.ResourceLimits` wiring. The implementer prompt describes them as conditional hooks inside ptySession but they don't compose naturally with `creack/pty.Start` (go-runner's supervision wraps a `runner.Run` call; PTY bypasses that path). The acceptance criteria don't require them. Forward-compat: when consumers need PTY supervision, the design will include a restart-loop wrapper inside ptyRuntime that observes `cmd.Wait` rather than threading through go-runner.
+- `StartOptions.Supervisor` / `StartOptions.ResourceLimits` wiring on the PTY path. These don't compose naturally with `creack/pty.Start` (go-runner's supervision wraps a `runner.Run` call; PTY bypasses that path). Forward-compat: when consumers need PTY supervision, the design will include a restart-loop wrapper inside ptyRuntime that observes `cmd.Wait` rather than threading through go-runner. (Landed in v0.6.0.)
 - Typed events on the adapter path. The adapter runtime drives `runner.Run` which doesn't currently surface raw lines through go-providers' `WithEvents` plumbing; typed events on adapter sessions remain a v0.5.0+ increment.
 - Per-adapter PTY opt-in beyond claude-code. Other adapters (opencode / codex / gemini / aider / junie / copilot) stay subprocess-per-turn; their Caps.PTY remains false.
-- Recovery broker (nanite's D-SUBAGENT-RECOVERY-BROKER) — app-internal first.
-- Live attach broker HTTP endpoint — consumer concern (mux already has its own; nanite would build on top of `Manager.Attach`).
+- Recovery broker — app-internal pattern; the lib stops at the supervision hooks.
+- Live attach broker HTTP endpoint — consumer concern; downstream apps build their own on top of `Manager.Attach`.
 
 ### Verification
 
@@ -187,13 +206,13 @@ The attach broker behind `Manager.Attach` / `Manager.AttachWith` (in-memory drop
   ```
   ok.
 
-### Origin
+### Dependencies
 
-Cross-app design: `agent-workspaces/planning/agent-boot-unification/2026-05-07-cross-app-design.md`. Portfolio decision: Vanta `decisions.portfolio.architecture.agent_boot_pattern` rev `01KR2Y2PYBR7FM8VXJBB831WG3`. Nanite consumer decision: `decisions.nanite.architecture.cli_pty_long_lived_default` rev `01KR2Y16TZJC8X88E6P497JBH3`. Tier 1 dep: go-runner v0.3.0. Tier 2 dep: go-providers v0.8.0.
+Tier 1 dep: `go-runner` v0.3.0. Tier 2 dep: `go-providers` v0.8.0.
 
 ## v0.3.0 — 2026-04-27
 
-Adds `StartOptions.Stderr io.Writer` for caller-controlled stderr capture in adapter-driven sessions. Companion to `go-runner` v0.2.0 (which adds the same field on `runner.Config`); the agent-sessions field forwards directly. Filed in clockwork as `CW-20260427-0056`; consumed by clockwork's wrapper-driven executor (`CW-20260427-0040`) to preserve its per-run stderr sidecar log (`CW-20260417-0024`).
+Adds `StartOptions.Stderr io.Writer` for caller-controlled stderr capture in adapter-driven sessions. Companion to `go-runner` v0.2.0 (which adds the same field on `runner.Config`); the agent-sessions field forwards directly.
 
 ### Public API additions
 
@@ -211,19 +230,11 @@ Adds `StartOptions.Stderr io.Writer` for caller-controlled stderr capture in ada
 - darwin host: `go build ./...`, `go vet ./...`, `go test -race -timeout 120s ./...` — pass
 - linux cross-compile: `GOOS=linux go build ./...`, `go vet ./...` — ok
 
-### Origin
-
-Clockwork ticket `CW-20260427-0056` under epic `EP-20260427-0001` (clockwork-side adoption of CLI substrate libs + signal-protocol redesign). Bundles with `CW-20260427-0044` (go-runner v0.2.0).
-
 ## v0.2.0 — 2026-04-27
 
 Adds optional typed `EventFanout chan<- provider.StreamEvent` to `StartOptions` so consumers can receive parsed stream events directly without re-parsing bytes from the byte `Fanout`. Both `NewFromAdapter` and `NewFromProvider` honor it. Drop-not-block on slow consumers; nil preserves v0.1.0 behavior exactly.
 
 Decision: `docs/decisions/0005-typed-event-fanout.md`.
-
-### Origin
-
-Clockwork ticket `CW-20260427-0045`.
 
 ## v0.1.0 — 2026-04-27
 

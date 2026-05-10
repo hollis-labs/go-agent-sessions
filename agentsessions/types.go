@@ -245,9 +245,9 @@ type StartOptions struct {
 
 	// AutoFireFirstTurn, when true, instructs the runtime to deliver
 	// FirstTurnPayload as the first SendInput automatically after Start
-	// succeeds. Eliminates the Launch/SendInput race that bit consumers
-	// previously (e.g. clockwork CW-20260507-0011) — Start does not return
-	// until the payload has been delivered to the input channel.
+	// succeeds. Eliminates the Launch/SendInput race that bit early
+	// consumers — Start does not return until the payload has been
+	// delivered to the input channel.
 	//
 	// For PTY runtimes with BootMode == "stdin" and a non-empty BootPrompt,
 	// this is a no-op (the boot prompt is already written to ptmx during
@@ -280,8 +280,8 @@ type StartOptions struct {
 	//   - Adapter runtime (Caps.PTY=false, subprocess-per-turn): this field
 	//     is currently NOT consulted. The adapter runtime drives runner.Run
 	//     which surfaces provider events as runner.EventProviderEvent
-	//     (StreamEvent shape). Typed events on the adapter path is v0.5.0+
-	//     work — see CHANGELOG and the implementer report's "Out of scope".
+	//     (StreamEvent shape). Typed events on the adapter path remain a
+	//     follow-up increment — see CHANGELOG "Out of scope".
 	//
 	// Sends are synchronous; treat the callback the way you'd treat an
 	// io.Writer's Write — keep the work short or hand off to your own
