@@ -36,11 +36,11 @@ import (
 // no go-runner involvement on this path. Restart preserves the provider-
 // side agent_session_id when Caps.ProviderSessionID is true.
 //
-// Pattern lifted from agent-mux/internal/provider/cli/claudecode/runtime.go
-// + agent-mux/internal/session/runtime.go (RWMutex + wait + lifecycle),
-// generalized: any provider.CLIAdapter that opts in via Caps.PTY=true gets
-// the same lifecycle. The legacy adapterSession (subprocess-per-turn) is
-// untouched; consumers that don't flip the cap see no behavior change.
+// Pattern lifted from agent-mux's claudecode runtime + session runtime
+// (RWMutex + wait + lifecycle), generalized: any provider.CLIAdapter that
+// opts in via Caps.PTY=true gets the same lifecycle. The legacy
+// adapterSession (subprocess-per-turn) is untouched; consumers that don't
+// flip the cap see no behavior change.
 type ptyRuntime struct {
 	cfg AdapterRuntimeConfig
 }

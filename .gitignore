@@ -1,0 +1,36 @@
+# Go build artifacts
+*.test
+*.out
+*.exe
+*.dll
+*.so
+*.dylib
+coverage.txt
+coverage.html
+*.prof
+
+# Local example binaries (built by `go build ./examples/...`)
+runner_session
+/examples/runner_session/runner_session
+
+# Editor / OS noise
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+
+# Local environment
+.env
+.env.local
+*.local
+
+# Internal-agent tooling — must not appear in a public repo
+.agentrc/
+.claude/
+.nanite/
+agentrc.yaml
+agentrc.yml
+CLAUDE.md
+AGENTS.md
+AUDIT_RESULTS.md

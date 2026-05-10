@@ -79,7 +79,7 @@ const (
 //   - All subscriber channels are closed exactly once — either on
 //     individual cancel() or on broker close(), whichever comes first.
 //
-// Lifted verbatim from agent-mux/internal/runtime/attach.go (ADR 0004).
+// Lifted verbatim from agent-mux's runtime attach broker.
 type attachBroker struct {
 	ringCap      int
 	chanCap      int

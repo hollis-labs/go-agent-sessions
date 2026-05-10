@@ -7,7 +7,7 @@ It is the composition layer above the hollis-labs primitive libs (`go-providers`
 
 ## Status
 
-v0 — extracted from agent-mux's `internal/runtime` and `internal/provider` packages (1,800+ LOC + tests, ADRs 0004/0006/0013/0025) and rebased onto the public hollis-labs primitive libs. The compliance harness, the attach broker (drop-oldest ring + drop-on-slow-subscriber), and the per-Session `inputMu` serialization carry over verbatim.
+v0 — extracted from agent-mux's runtime and provider packages (1,800+ LOC + tests) and rebased onto the public hollis-labs primitive libs. The compliance harness, the attach broker (drop-oldest ring + drop-on-slow-subscriber), and the per-Session `inputMu` serialization carry over verbatim.
 
 ## Install
 
@@ -99,10 +99,11 @@ sess, err := rt.Start(ctx, agentsessions.StartOptions{
 })
 ```
 
-Eliminates the Launch/SendInput race that bit consumers previously
-(clockwork CW-20260507-0011). When `BootMode == "stdin"` and `BootPrompt`
-is non-empty, AutoFireFirstTurn is a no-op for the PTY runtime — the
-boot prompt was already written to ptmx during Start.
+Eliminates the Launch/SendInput race that bit early consumers — by the
+time `Start` returns, the first input is already in flight. When
+`BootMode == "stdin"` and `BootPrompt` is non-empty, AutoFireFirstTurn
+is a no-op for the PTY runtime — the boot prompt was already written to
+ptmx during Start.
 
 ### PTY supervision (idle-kill, restart-on-crash, watchdog)
 
@@ -420,9 +421,9 @@ In:
   through a caller-supplied `StateSink`, watches for terminal exits in
   background goroutines, and exposes `Attach` / `AttachWith` for
   multi-subscriber live streaming with byte-offset resume.
-- Compliance harness ported verbatim from agent-mux ADR 0025; consumers
-  pass their `Runtime` and the harness runs the baseline + capability-
-  gated tests.
+- Compliance harness ported verbatim from agent-mux; consumers pass
+  their `Runtime` and the harness runs the baseline + capability-gated
+  tests.
 - Process-level `State` enum: launching, running, done, failed.
   Consumer domain FSMs (clockwork tasks, mux logical agents) map on top.
 - Compose with `go-sandbox` (`StartOptions.Profile` is applied by
@@ -497,10 +498,10 @@ go-agent-sessions/
 
 - **Public types** (`Session`, `Runtime`, `StartOptions`, `Capabilities`,
   `HealthStatus`, `LiveState`, `CheckpointHint`, `SessionIDer`,
-  `ErrNoInputChannel`) — extracted from `agent-mux/internal/provider/provider.go` (ADR 0006).
-- **Manager + watch goroutine** — extracted from `agent-mux/internal/runtime/manager.go` (ADR 0004 attach broker pin).
-- **Attach broker** — lifted verbatim from `agent-mux/internal/runtime/attach.go` (ring buffer + drop-oldest, drop-on-slow-subscriber, `subscribeSince` byte-offset resume).
-- **Compliance harness** — adapted from `agent-mux/internal/provider/compliance/compliance.go` (ADR 0025).
+  `ErrNoInputChannel`) — extracted from the agent-mux provider package.
+- **Manager + watch goroutine** — extracted from the agent-mux runtime package.
+- **Attach broker** — lifted verbatim from agent-mux's runtime broker (ring buffer + drop-oldest, drop-on-slow-subscriber, `subscribeSince` byte-offset resume).
+- **Compliance harness** — adapted from agent-mux's provider compliance suite.
 - **Process-level State enum** — new (4 values: launching, running, done, failed). Mux's mux-domain `session.State` had additional values (Killed, etc.) that belong in mux's logical-agent layer; the library state is process-level only.
 
 ## License

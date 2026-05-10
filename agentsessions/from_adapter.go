@@ -129,9 +129,9 @@ func (r *adapterRuntime) Start(ctx context.Context, opts StartOptions) (Session,
 		// Synchronous first turn: subprocess-per-turn semantics mean the
 		// runner.Run completes before SendInput returns. Start blocks until
 		// the kickoff turn finishes — eliminates the Launch/SendInput race
-		// (CW-20260507-0011) at the cost of a longer Start. Consumers that
-		// don't want this latency leave AutoFireFirstTurn=false and call
-		// SendInput on their own schedule.
+		// at the cost of a longer Start. Consumers that don't want this
+		// latency leave AutoFireFirstTurn=false and call SendInput on their
+		// own schedule.
 		if err := s.SendInput(ctx, opts.FirstTurnPayload); err != nil {
 			_ = s.Stop(ctx)
 			return nil, fmt.Errorf("agentsessions: auto-fire first turn: %w", err)
@@ -234,11 +234,9 @@ func (s *adapterSession) SendInput(ctx context.Context, data []byte) error {
 		OnEvent:    s.handleRunnerEvent,
 	}
 	// StartOptions.Supervisor + ResourceLimits are PTY-only in v0.6.0.
-	// Forwarding them to runner.Config.Supervisor / .ResourceLimits is
-	// blocked on go-runner publishing its v0.3.0 supervision API (the
-	// supervisor commits exist locally but are not in the published
-	// module). Tracked as a v0.6.x follow-up — see CHANGELOG and the
-	// implementer report's "Out of scope".
+	// Forwarding them to runner.Config.Supervisor / .ResourceLimits on
+	// the adapter path remains a follow-up increment — see CHANGELOG
+	// "Out of scope".
 	err := runner.Run(runCtx, cfg)
 	if err != nil {
 		s.exitCode.Store(1)
