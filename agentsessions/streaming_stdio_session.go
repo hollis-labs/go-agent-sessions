@@ -59,17 +59,27 @@ func (r *streamingStdioRuntime) Start(ctx context.Context, opts StartOptions) (S
 		return nil, errors.New("agentsessions: StartOptions.Workdir is required for streaming-stdio runtime")
 	}
 
+	bootDir, planted, sessionAdapter, err := preparePlant(opts, r.cfg.Adapter, r.cfg.ID)
+	if err != nil {
+		return nil, err
+	}
+	opts = planted
+
 	logPath, err := resolveStreamingStdioLogPath(opts)
 	if err != nil {
+		cleanupBootDir(bootDir)
 		return nil, err
 	}
 	logF, err := os.Create(logPath) //nolint:gosec // G304: workspace-managed path
 	if err != nil {
+		cleanupBootDir(bootDir)
 		return nil, fmt.Errorf("agentsessions: open log: %w", err)
 	}
 
 	s := &streamingStdioSession{
 		runtime:       r,
+		adapter:       sessionAdapter,
+		bootDir:       bootDir,
 		opts:          opts,
 		logFile:       logF,
 		done:          make(chan error, 1),
@@ -82,6 +92,7 @@ func (r *streamingStdioRuntime) Start(ctx context.Context, opts StartOptions) (S
 	cmd, stdin, stdout, attemptCleanup, err := s.spawnAttempt(0)
 	if err != nil {
 		_ = logF.Close()
+		cleanupBootDir(bootDir)
 		return nil, err
 	}
 
@@ -127,6 +138,14 @@ func resolveStreamingStdioLogPath(opts StartOptions) (string, error) {
 // streamingStdioSession is the long-lived stdio-backed Session implementation.
 type streamingStdioSession struct {
 	runtime *streamingStdioRuntime
+	// adapter is the per-session CLIAdapter — usually a pointer alias to
+	// runtime.cfg.Adapter, but a per-session clone when AutoPlantBootDir
+	// fired bare-mode injection. Always non-nil after Start.
+	adapter provider.CLIAdapter
+	// bootDir is the absolute path of the AutoPlantBootDir-planted tempdir,
+	// or "" when no plant happened. Cleaned up exactly once at terminal
+	// state via cleanupBootDir.
+	bootDir string
 	opts    StartOptions
 
 	// cmd / stdin / stdout point at the CURRENT attempt's process + pipes.
@@ -171,9 +190,9 @@ type streamingStdioSession struct {
 // Returns the cmd + pipes (so callers can capture them) and a cleanup func
 // to invoke after cmd.Wait completes.
 func (s *streamingStdioSession) spawnAttempt(attempt int) (*exec.Cmd, io.WriteCloser, io.ReadCloser, func(), error) {
-	binary, ok := s.runtime.cfg.Adapter.Detect()
+	binary, ok := s.adapter.Detect()
 	if !ok {
-		return nil, nil, nil, nil, fmt.Errorf("agentsessions: adapter %q binary not found", s.runtime.cfg.Adapter.Name())
+		return nil, nil, nil, nil, fmt.Errorf("agentsessions: adapter %q binary not found", s.adapter.Name())
 	}
 
 	systemPrompt := s.opts.BootPrompt
@@ -187,7 +206,10 @@ func (s *streamingStdioSession) spawnAttempt(attempt int) (*exec.Cmd, io.WriteCl
 			sessionIDPreset = sid
 		}
 	}
-	args := s.runtime.cfg.Adapter.BuildArgs("", systemPrompt, sessionIDPreset)
+	args := s.adapter.BuildArgs("", systemPrompt, sessionIDPreset)
+	if len(s.opts.ExtraArgs) > 0 {
+		args = append(args, s.opts.ExtraArgs...)
+	}
 
 	cmd := exec.Command(binary, args...) //nolint:gosec // G204: adapter-sourced binary + args
 	cmd.Dir = s.opts.Workdir
@@ -312,7 +334,7 @@ func (s *streamingStdioSession) runReaderLoop(stdout io.Reader) {
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024)
 
-	_, hasParser := s.runtime.cfg.Adapter.(provider.EventParser)
+	_, hasParser := s.adapter.(provider.EventParser)
 
 	for scanner.Scan() {
 		raw := scanner.Bytes()
@@ -322,7 +344,7 @@ func (s *streamingStdioSession) runReaderLoop(stdout io.Reader) {
 		line[len(raw)] = '\n'
 		_, _ = sink.Write(line)
 
-		if evs, perr := s.runtime.cfg.Adapter.ParseLine(raw); perr == nil {
+		if evs, perr := s.adapter.ParseLine(raw); perr == nil {
 			for _, ev := range evs {
 				if ev.Type == llmtypes.EventSessionID && ev.SessionID != "" {
 					s.lastSessionID.Store(ev.SessionID)
@@ -337,7 +359,7 @@ func (s *streamingStdioSession) runReaderLoop(stdout io.Reader) {
 		if s.opts.TypedEventCallback != nil {
 			var typed []pevents.Event
 			if hasParser {
-				if t, perr := s.runtime.cfg.Adapter.(provider.EventParser).ParseLineEvents(raw); perr == nil {
+				if t, perr := s.adapter.(provider.EventParser).ParseLineEvents(raw); perr == nil {
 					typed = t
 				}
 			}
@@ -386,6 +408,7 @@ func (s *streamingStdioSession) spawnWaiterLegacy(cmd *exec.Cmd, stdin io.WriteC
 		if s.legacyCleanup != nil {
 			s.legacyCleanup()
 		}
+		cleanupBootDir(s.bootDir)
 	}()
 }
 
@@ -423,6 +446,7 @@ func (s *streamingStdioSession) runSupervised(ctx context.Context, firstCmd *exe
 			}
 			close(s.done)
 		})
+		cleanupBootDir(s.bootDir)
 	}()
 
 	for attempt := 0; attempt <= maxRestarts; attempt++ {

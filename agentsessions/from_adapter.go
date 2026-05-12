@@ -118,8 +118,17 @@ func (r *adapterRuntime) Start(ctx context.Context, opts StartOptions) (Session,
 	if opts.Workdir == "" {
 		return nil, errors.New("agentsessions: StartOptions.Workdir is required for adapter runtime")
 	}
+
+	bootDir, planted, sessionAdapter, err := preparePlant(opts, r.cfg.Adapter, r.cfg.ID)
+	if err != nil {
+		return nil, err
+	}
+	opts = planted
+
 	s := &adapterSession{
 		runtime:   r,
+		adapter:   sessionAdapter,
+		bootDir:   bootDir,
 		opts:      opts,
 		buildArgs: r.cfg.BuildArgs,
 		stopCh:    make(chan struct{}),
@@ -130,7 +139,19 @@ func (r *adapterRuntime) Start(ctx context.Context, opts StartOptions) (Session,
 	s.state.Store(int32(LiveStateIdle))
 	if s.buildArgs == nil {
 		s.buildArgs = func(prompt, sessionID string) []string {
-			return r.cfg.Adapter.BuildArgs(prompt, "", sessionID)
+			return sessionAdapter.BuildArgs(prompt, "", sessionID)
+		}
+	}
+	// ExtraArgs splice composes over whatever buildArgs is in use (caller-
+	// supplied or default). Captures len at Start; opts is value-copied
+	// into the session struct so post-Start mutation by the caller does
+	// not retroactively rewrite per-turn argv.
+	if len(opts.ExtraArgs) > 0 {
+		inner := s.buildArgs
+		extra := append([]string(nil), opts.ExtraArgs...)
+		s.buildArgs = func(prompt, sessionID string) []string {
+			args := inner(prompt, sessionID)
+			return append(args, extra...)
 		}
 	}
 
@@ -154,7 +175,15 @@ func (r *adapterRuntime) Start(ctx context.Context, opts StartOptions) (Session,
 // context cancel; Wait blocks on done (closed when Stop has fully
 // drained).
 type adapterSession struct {
-	runtime   *adapterRuntime
+	runtime *adapterRuntime
+	// adapter is the per-session CLIAdapter — usually a pointer alias to
+	// runtime.cfg.Adapter, but a per-session clone when AutoPlantBootDir
+	// fired bare-mode injection. Always non-nil after Start.
+	adapter provider.CLIAdapter
+	// bootDir is the absolute path of the AutoPlantBootDir-planted tempdir,
+	// or "" when no plant happened. Cleaned up exactly once at terminal
+	// state (Stop) via cleanupBootDir.
+	bootDir   string
 	opts      StartOptions
 	buildArgs func(prompt, sessionID string) []string
 
@@ -195,7 +224,10 @@ func (s *adapterSession) Stop(ctx context.Context) error {
 	// Stop is non-blocking on adapter sessions: there is no long-lived
 	// process to drain; turn-in-flight is cancelled via stopCh, which
 	// the runner's context observes.
-	s.doneOnce.Do(func() { close(s.done) })
+	s.doneOnce.Do(func() {
+		close(s.done)
+		cleanupBootDir(s.bootDir)
+	})
 	return nil
 }
 
@@ -232,7 +264,7 @@ func (s *adapterSession) SendInput(ctx context.Context, data []byte) error {
 	}()
 
 	cfg := runner.Config{
-		Provider:   s.runtime.cfg.Adapter,
+		Provider:   s.adapter,
 		Profile:    s.opts.Profile,
 		Workspace:  s.opts.Workdir,
 		Args:       args,

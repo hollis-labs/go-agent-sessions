@@ -19,6 +19,7 @@ package agentsessions
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"sync"
@@ -397,6 +398,45 @@ func (m *Manager) SendInput(id string, data []byte) error {
 	e.inputMu.Lock()
 	defer e.inputMu.Unlock()
 	return e.sess.SendInput(context.Background(), data)
+}
+
+// JsonRpcCall dispatches a JSON-RPC 2.0 request to the named session and
+// blocks for the response. The Manager preserves the invariant that raw
+// Sessions are never exposed to callers; this method type-narrows to the
+// JsonRpcCaller capability and forwards Call(ctx, method, params).
+//
+// Errors:
+//   - ErrSessionNotRunning if no session with id is registered.
+//   - ErrSessionNotJsonRpcCapable if the session exists but its underlying
+//     runtime does not implement JsonRpcCaller (PTY, streaming-stdio, or
+//     adapter runtime).
+//   - *JsonRpcError (errors.As-extractable) when the remote returns a
+//     JSON-RPC error response.
+//   - ctx.Err() when the caller cancels before the response arrives.
+//   - Other errors propagated verbatim from JsonRpcCaller.Call.
+//
+// The Manager-level registry lock is released before invoking Call so
+// long-running JSON-RPC requests do not block concurrent Manager
+// operations (lookup-then-release pattern, symmetric with SendInput and
+// Resize).
+//
+// Added in v0.9.0. See package godoc on Manager for the capability-dispatch
+// framing: per-session capabilities live on the Session itself; the Manager
+// exposes them as Manager-level methods (Stop, SendInput, Resize,
+// JsonRpcCall) that internally route to the right session. Direct access
+// to the raw Session remains intentionally unavailable.
+func (m *Manager) JsonRpcCall(ctx context.Context, id string, method string, params any) (json.RawMessage, error) {
+	m.mu.RLock()
+	e, ok := m.registry[id]
+	m.mu.RUnlock()
+	if !ok {
+		return nil, ErrSessionNotRunning
+	}
+	caller, ok := e.sess.(JsonRpcCaller)
+	if !ok {
+		return nil, ErrSessionNotJsonRpcCapable
+	}
+	return caller.Call(ctx, method, params)
 }
 
 // Resize forwards a (rows, cols) winsize update. Not guarded by inputMu

@@ -59,17 +59,27 @@ func (r *jsonRpcStdioRuntime) Start(ctx context.Context, opts StartOptions) (Ses
 		return nil, errors.New("agentsessions: StartOptions.Workdir is required for jsonrpc-stdio runtime")
 	}
 
+	bootDir, planted, sessionAdapter, err := preparePlant(opts, r.cfg.Adapter, r.cfg.ID)
+	if err != nil {
+		return nil, err
+	}
+	opts = planted
+
 	logPath, err := resolveJsonRpcStdioLogPath(opts)
 	if err != nil {
+		cleanupBootDir(bootDir)
 		return nil, err
 	}
 	logF, err := os.Create(logPath) //nolint:gosec // G304: workspace-managed path
 	if err != nil {
+		cleanupBootDir(bootDir)
 		return nil, fmt.Errorf("agentsessions: open log: %w", err)
 	}
 
 	s := &jsonRpcStdioSession{
 		runtime:       r,
+		adapter:       sessionAdapter,
+		bootDir:       bootDir,
 		opts:          opts,
 		logFile:       logF,
 		done:          make(chan error, 1),
@@ -83,6 +93,7 @@ func (r *jsonRpcStdioRuntime) Start(ctx context.Context, opts StartOptions) (Ses
 	cmd, stdin, stdout, attemptCleanup, err := s.spawnAttempt(0)
 	if err != nil {
 		_ = logF.Close()
+		cleanupBootDir(bootDir)
 		return nil, err
 	}
 
@@ -141,6 +152,14 @@ type jsonRpcFrame struct {
 // jsonRpcStdioSession is the long-lived JSON-RPC 2.0 Session implementation.
 type jsonRpcStdioSession struct {
 	runtime *jsonRpcStdioRuntime
+	// adapter is the per-session CLIAdapter — usually a pointer alias to
+	// runtime.cfg.Adapter, but a per-session clone when AutoPlantBootDir
+	// fired bare-mode injection. Always non-nil after Start.
+	adapter provider.CLIAdapter
+	// bootDir is the absolute path of the AutoPlantBootDir-planted tempdir,
+	// or "" when no plant happened. Cleaned up exactly once at terminal
+	// state via cleanupBootDir.
+	bootDir string
 	opts    StartOptions
 
 	cmd     *exec.Cmd
@@ -178,9 +197,9 @@ type jsonRpcStdioSession struct {
 }
 
 func (s *jsonRpcStdioSession) spawnAttempt(attempt int) (*exec.Cmd, io.WriteCloser, io.ReadCloser, func(), error) {
-	binary, ok := s.runtime.cfg.Adapter.Detect()
+	binary, ok := s.adapter.Detect()
 	if !ok {
-		return nil, nil, nil, nil, fmt.Errorf("agentsessions: adapter %q binary not found", s.runtime.cfg.Adapter.Name())
+		return nil, nil, nil, nil, fmt.Errorf("agentsessions: adapter %q binary not found", s.adapter.Name())
 	}
 
 	systemPrompt := s.opts.BootPrompt
@@ -194,7 +213,10 @@ func (s *jsonRpcStdioSession) spawnAttempt(attempt int) (*exec.Cmd, io.WriteClos
 			sessionIDPreset = sid
 		}
 	}
-	args := s.runtime.cfg.Adapter.BuildArgs("", systemPrompt, sessionIDPreset)
+	args := s.adapter.BuildArgs("", systemPrompt, sessionIDPreset)
+	if len(s.opts.ExtraArgs) > 0 {
+		args = append(args, s.opts.ExtraArgs...)
+	}
 
 	cmd := exec.Command(binary, args...) //nolint:gosec // G204
 	cmd.Dir = s.opts.Workdir
@@ -316,7 +338,7 @@ func (s *jsonRpcStdioSession) runReaderLoop(stdout io.Reader) {
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024)
 
-	_, hasParser := s.runtime.cfg.Adapter.(provider.EventParser)
+	_, hasParser := s.adapter.(provider.EventParser)
 
 	for scanner.Scan() {
 		raw := scanner.Bytes()
@@ -335,7 +357,7 @@ func (s *jsonRpcStdioSession) runReaderLoop(stdout io.Reader) {
 		// Adapter-level ParseLine / ParseLineEvents fire on every line
 		// (response or notification) to keep parity with the streaming
 		// path; adapters that don't want this simply return empty.
-		if evs, perr := s.runtime.cfg.Adapter.ParseLine(raw); perr == nil {
+		if evs, perr := s.adapter.ParseLine(raw); perr == nil {
 			for _, ev := range evs {
 				if ev.Type == llmtypes.EventSessionID && ev.SessionID != "" {
 					s.lastSessionID.Store(ev.SessionID)
@@ -347,7 +369,7 @@ func (s *jsonRpcStdioSession) runReaderLoop(stdout io.Reader) {
 			}
 		}
 		if s.opts.TypedEventCallback != nil && hasParser {
-			if typed, perr := s.runtime.cfg.Adapter.(provider.EventParser).ParseLineEvents(raw); perr == nil {
+			if typed, perr := s.adapter.(provider.EventParser).ParseLineEvents(raw); perr == nil {
 				for _, te := range typed {
 					s.opts.TypedEventCallback(te)
 				}
@@ -442,6 +464,7 @@ func (s *jsonRpcStdioSession) spawnWaiterLegacy(cmd *exec.Cmd, stdin io.WriteClo
 		if s.legacyCleanup != nil {
 			s.legacyCleanup()
 		}
+		cleanupBootDir(s.bootDir)
 	}()
 }
 
@@ -477,6 +500,7 @@ func (s *jsonRpcStdioSession) runSupervised(ctx context.Context, firstCmd *exec.
 			}
 			close(s.done)
 		})
+		cleanupBootDir(s.bootDir)
 	}()
 
 	for attempt := 0; attempt <= maxRestarts; attempt++ {

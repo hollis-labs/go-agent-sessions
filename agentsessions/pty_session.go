@@ -64,17 +64,27 @@ func (r *ptyRuntime) Start(ctx context.Context, opts StartOptions) (Session, err
 		return nil, errors.New("agentsessions: StartOptions.Workdir is required for pty runtime")
 	}
 
+	bootDir, planted, sessionAdapter, err := preparePlant(opts, r.cfg.Adapter, r.cfg.ID)
+	if err != nil {
+		return nil, err
+	}
+	opts = planted
+
 	logPath, err := resolvePTYLogPath(opts)
 	if err != nil {
+		cleanupBootDir(bootDir)
 		return nil, err
 	}
 	logF, err := os.Create(logPath) //nolint:gosec // G304: workspace-managed path
 	if err != nil {
+		cleanupBootDir(bootDir)
 		return nil, fmt.Errorf("agentsessions: open log: %w", err)
 	}
 
 	s := &ptySession{
 		runtime:       r,
+		adapter:       sessionAdapter,
+		bootDir:       bootDir,
 		opts:          opts,
 		logFile:       logF,
 		done:          make(chan error, 1),
@@ -89,6 +99,7 @@ func (r *ptyRuntime) Start(ctx context.Context, opts StartOptions) (Session, err
 	cmd, ptmx, attemptCleanup, err := s.spawnAttempt(0)
 	if err != nil {
 		_ = logF.Close()
+		cleanupBootDir(bootDir)
 		return nil, err
 	}
 
@@ -143,6 +154,14 @@ func resolvePTYLogPath(opts StartOptions) (string, error) {
 // ptySession is the long-lived PTY-backed Session implementation.
 type ptySession struct {
 	runtime *ptyRuntime
+	// adapter is the per-session CLIAdapter — usually a pointer alias to
+	// runtime.cfg.Adapter, but a per-session clone when AutoPlantBootDir
+	// fired bare-mode injection. Always non-nil after Start.
+	adapter provider.CLIAdapter
+	// bootDir is the absolute path of the AutoPlantBootDir-planted tempdir,
+	// or "" when no plant happened. Cleaned up exactly once at terminal
+	// state via cleanupBootDir.
+	bootDir string
 	opts    StartOptions
 
 	// cmd / ptmx are the CURRENT attempt's process + master fd. On the
@@ -203,9 +222,9 @@ type ptySession struct {
 // Returns the cmd + ptmx locals (so callers can capture them) and a
 // cleanup func to invoke after cmd.Wait completes.
 func (s *ptySession) spawnAttempt(attempt int) (*exec.Cmd, *os.File, func(), error) {
-	binary, ok := s.runtime.cfg.Adapter.Detect()
+	binary, ok := s.adapter.Detect()
 	if !ok {
-		return nil, nil, nil, fmt.Errorf("agentsessions: adapter %q binary not found", s.runtime.cfg.Adapter.Name())
+		return nil, nil, nil, fmt.Errorf("agentsessions: adapter %q binary not found", s.adapter.Name())
 	}
 
 	// Boot prompt is delivered through exactly one channel — either stdin
@@ -229,7 +248,10 @@ func (s *ptySession) spawnAttempt(attempt int) (*exec.Cmd, *os.File, func(), err
 			sessionIDPreset = sid
 		}
 	}
-	args := s.runtime.cfg.Adapter.BuildArgs("", systemPrompt, sessionIDPreset)
+	args := s.adapter.BuildArgs("", systemPrompt, sessionIDPreset)
+	if len(s.opts.ExtraArgs) > 0 {
+		args = append(args, s.opts.ExtraArgs...)
+	}
 
 	cmd := exec.Command(binary, args...) //nolint:gosec // G204: adapter-sourced binary + args
 	cmd.Dir = s.opts.Workdir
@@ -330,7 +352,7 @@ func (s *ptySession) runReaderLoop(ptmx *os.File) {
 	scanner := bufio.NewScanner(ptmx)
 	scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024)
 
-	_, hasParser := s.runtime.cfg.Adapter.(provider.EventParser)
+	_, hasParser := s.adapter.(provider.EventParser)
 
 	for scanner.Scan() {
 		raw := scanner.Bytes()
@@ -346,7 +368,7 @@ func (s *ptySession) runReaderLoop(ptmx *os.File) {
 		// Legacy stream-event parse — feed EventFanout + OnSessionID, and
 		// capture the session ID into lastSessionID for restart-preservation
 		// on the supervised path.
-		if evs, perr := s.runtime.cfg.Adapter.ParseLine(raw); perr == nil {
+		if evs, perr := s.adapter.ParseLine(raw); perr == nil {
 			for _, ev := range evs {
 				if ev.Type == llmtypes.EventSessionID && ev.SessionID != "" {
 					s.lastSessionID.Store(ev.SessionID)
@@ -362,7 +384,7 @@ func (s *ptySession) runReaderLoop(ptmx *os.File) {
 		if s.opts.TypedEventCallback != nil {
 			var typed []pevents.Event
 			if hasParser {
-				if t, perr := s.runtime.cfg.Adapter.(provider.EventParser).ParseLineEvents(raw); perr == nil {
+				if t, perr := s.adapter.(provider.EventParser).ParseLineEvents(raw); perr == nil {
 					typed = t
 				}
 			}
@@ -411,6 +433,7 @@ func (s *ptySession) spawnWaiterLegacy(ptmx *os.File, cmd *exec.Cmd) {
 		if s.legacyCleanup != nil {
 			s.legacyCleanup()
 		}
+		cleanupBootDir(s.bootDir)
 	}()
 }
 
@@ -464,6 +487,7 @@ func (s *ptySession) runSupervised(ctx context.Context, firstCmd *exec.Cmd, firs
 			}
 			close(s.done)
 		})
+		cleanupBootDir(s.bootDir)
 	}()
 
 	for attempt := 0; attempt <= maxRestarts; attempt++ {

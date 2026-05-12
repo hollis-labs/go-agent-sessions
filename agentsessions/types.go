@@ -422,6 +422,69 @@ type StartOptions struct {
 	// Added in v0.8.0.
 	JsonRpcNotificationHook func(method string, params json.RawMessage)
 
+	// AutoPlantBootDir, when true AND the adapter implements
+	// provider.BootDirProvider, instructs the runtime to materialize the
+	// adapter's BootDirSpec into a per-session tempdir on Start and remove
+	// it on terminal state. The lib:
+	//   - creates a tempdir under BootDirRoot (or WorkspaceDir+"/boot/",
+	//     or os.TempDir() if both are empty)
+	//   - walks BootDirSpec.PlantedFiles, calls each Render(plantCtx), and
+	//     writes the content (mode 0o600 for .mcp.json / settings.json,
+	//     0o644 default; PlantedFile.Mode overrides when non-zero)
+	//   - substitutes `{{.BootDir}}` / `{{.ProjectDir}}` in
+	//     BootDirSpec.EnvAmendments and appends to Env
+	//   - substitutes the same tokens in BootDirSpec.ProjectDirArg and
+	//     appends to ExtraArgs (which the runtime splices into argv after
+	//     adapter.BuildArgs)
+	//   - sets Workdir to BootDirSpec.SpawnWorkdir(bootDir, originalWorkdir)
+	//   - for Claude bare-mode adapters, applies BareInjectionPaths and
+	//     mutates a per-session clone of the adapter so the planted paths
+	//     thread into BuildArgs
+	//   - emits OnBootDirPlanted (when set) once on successful plant
+	//   - calls os.RemoveAll(bootDir) once on terminal state regardless of
+	//     exit cause; cleanup failures are logged but never surface as
+	//     session errors
+	//
+	// Default false preserves v0.8.0 behavior exactly — no filesystem
+	// activity, no opts mutation. When true on an adapter that does NOT
+	// implement BootDirProvider (or whose BootDirSpec has no PlantedFiles),
+	// the runtime no-ops without error so generic consumers can leave the
+	// flag on across heterogeneous adapter fleets.
+	//
+	// Added in v0.9.0.
+	AutoPlantBootDir bool
+
+	// BootDirRoot overrides the parent directory under which AutoPlantBootDir
+	// creates the per-session tempdir. Default ordering when empty:
+	// WorkspaceDir+"/boot/" if WorkspaceDir is set, otherwise os.TempDir().
+	// When non-empty, the runtime MkdirAll's it (mode 0o750) before
+	// MkdirTemp. Ignored when AutoPlantBootDir is false.
+	//
+	// Added in v0.9.0.
+	BootDirRoot string
+
+	// OnBootDirPlanted, when non-nil, is invoked once on successful
+	// AutoPlantBootDir with the absolute path of the planted bootdir.
+	// Useful for debugging (operators want to inspect what got written
+	// before the session ends). The call fires synchronously from Start
+	// before the spawn — keep it short or hand off. Never invoked when
+	// AutoPlantBootDir is false or when no PlantedFiles were materialized.
+	//
+	// Added in v0.9.0.
+	OnBootDirPlanted func(path string)
+
+	// ExtraArgs, when non-nil, is appended to the runtime's argv after
+	// adapter.BuildArgs(...). Used internally by AutoPlantBootDir to thread
+	// BootDirSpec.ProjectDirArg through to the spawn (e.g. claude's
+	// `--add-dir <projectDir>`) without changing the adapter contract.
+	// Consumers may also set it directly when they need to splice
+	// per-session argv without wrapping the adapter; in that case the
+	// runtime does NOT do template substitution — pre-resolve any
+	// placeholders before passing the slice.
+	//
+	// Added in v0.9.0.
+	ExtraArgs []string
+
 	// ResourceLimits, when non-nil and non-zero, applies OS-level resource
 	// caps to spawned children (CPU time, virtual memory, open files,
 	// processes, file size). Wraps the spawn argv with
@@ -538,4 +601,12 @@ var (
 	// ErrAttachDisabled is returned by Manager.Attach* when the session
 	// was started with AttachEnabled=false.
 	ErrAttachDisabled = errors.New("agentsessions: attach not enabled for session")
+
+	// ErrSessionNotJsonRpcCapable is returned by Manager.JsonRpcCall when
+	// the named session exists but its underlying runtime does not
+	// implement JsonRpcCaller (e.g. PTY / streaming-stdio / adapter
+	// runtime). Type-narrowed alternative to exposing raw Session: the
+	// Manager dispatches to the JSON-RPC capability when it is present
+	// and reports this typed error when it is not. Added in v0.9.0.
+	ErrSessionNotJsonRpcCapable = errors.New("agentsessions: session does not implement JsonRpcCaller")
 )

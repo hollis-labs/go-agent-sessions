@@ -2,6 +2,119 @@
 
 All notable changes to `go-agent-sessions` are documented in this file. Per-release notes are also published as GitHub Releases.
 
+## v0.9.0 — 2026-05-11
+
+Two additive lib improvements: BootDirSpec planting absorbed into the
+runtime, and a Manager-mediated JSON-RPC passthrough. Both are surfaced
+from consumer-side gaps that emerged after v0.8.0 — the per-app planter
+duplication across mux/nanite/clockwork, and the inability for Manager-
+mediated consumers to reach the per-session `JsonRpcCaller`.
+
+### Part 1 — BootDirSpec absorption
+
+Opt-in via `StartOptions.AutoPlantBootDir bool`. When true AND the
+adapter implements `provider.BootDirProvider`, all four runtime kinds
+(`pty`, `streamingStdio`, `jsonRpcStdio`, adapter) now:
+
+- Materialize `BootDirSpec.PlantedFiles` into a per-session tempdir
+  under `BootDirRoot` / `WorkspaceDir+"/boot/"` / `os.TempDir()`.
+- Render each file with `PlantContext{SystemPrompt, BootContent,
+  ProjectDir, BootDir}`; write at the spec-appropriate mode (0o600
+  for `.mcp.json` / `settings.json`, 0o644 default).
+- Substitute `{{.BootDir}}` / `{{.ProjectDir}}` in `EnvAmendments`
+  (appended to `StartOptions.Env`) and `ProjectDirArg` (appended via
+  the new `StartOptions.ExtraArgs`).
+- Set the spawn cwd to `BootDirSpec.SpawnWorkdir(bootDir, projectDir)`.
+- For Claude bare-mode adapters, apply `BareInjectionPaths` to a
+  per-session clone of the adapter (preserves runtime-level adapter
+  purity for concurrent sessions; suppresses the `ExtraArgs` splice
+  to avoid double-adding `--add-dir` since bare `BuildArgs` already
+  emits it).
+- Fire the optional `StartOptions.OnBootDirPlanted(path)` callback once
+  on successful plant.
+- Call `os.RemoveAll(bootDir)` exactly once at terminal state — covers
+  every exit path the runtime classifies (Stop, clean exit, idle-kill,
+  watchdog-kill, restart-exhausted, ctx-cancel).
+
+Default `AutoPlantBootDir=false` preserves v0.8.0 behavior exactly —
+no filesystem activity, no `StartOptions` mutation. Default-on flip is
+planned for v0.10.0 once mux / nanite / clockwork have all migrated.
+
+New `StartOptions` fields:
+
+- `AutoPlantBootDir bool` — feature flag.
+- `BootDirRoot string` — tempdir parent (override default).
+- `OnBootDirPlanted func(path string)` — debug-friendly success hook.
+- `ExtraArgs []string` — generic argv splice (also usable directly by
+  consumers that don't need plant but want per-session argv injection
+  without wrapping the adapter; templates are not substituted on this
+  path — pre-resolve before passing).
+
+When the flag is on for an adapter that doesn't implement
+`BootDirProvider`, the runtime no-ops cleanly (no error) so generic
+consumers can leave the flag on across heterogeneous adapter fleets.
+
+### Part 2 — `Manager.JsonRpcCall` passthrough
+
+New method on `Manager`:
+
+```go
+func (m *Manager) JsonRpcCall(ctx context.Context, id string, method string, params any) (json.RawMessage, error)
+```
+
+Preserves the existing invariant that raw `Session` references are not
+exposed by Manager. Internally looks the session up, releases the
+Manager-wide lock, type-asserts to `JsonRpcCaller`, and forwards
+`Call`. New typed error `ErrSessionNotJsonRpcCapable` is returned when
+the session exists but its runtime kind is not JSON-RPC capable
+(PTY / streaming-stdio / adapter). All other errors pass through
+unchanged: `ErrSessionNotRunning` for unknown id, `*JsonRpcError`
+(`errors.As`-extractable) for protocol errors, `ctx.Err()` for caller
+cancellation.
+
+Unconditional in v0.9.0 — no feature flag, additive only. Consumers
+that don't use `jsonRpcStdio` sessions are unaffected.
+
+### Out of scope
+
+- Default-on `AutoPlantBootDir` — sequenced as v0.10.0 after consumer
+  migration.
+- Adapter contract changes — `BootDirSpec` in go-providers is consumed
+  verbatim; no API additions there.
+- Per-app planter deletion — consumer-side, each app migrates on its
+  own timeline.
+- Typed `events.BootDirPlanted` event — substituted by the simpler
+  `OnBootDirPlanted` callback on `StartOptions`; the existing
+  `TypedEventCallback` surface is untouched.
+
+### Tests
+
+- `TestPreparePlant_*` (12 helper-level): flag-off, missing
+  `BootDirProvider`, empty `PlantedFiles`, files written with correct
+  content + mode, env amendments resolved, project-dir-arg threading
+  + empty-project skip, spawn cwd (`CwdBootDir` / `CwdProjectDir`),
+  render-failure cleanup, `OnBootDirPlanted` firing, bare-mode
+  injection (clone identity + path threading + no double-add).
+- `TestAutoPlantBootDir_Runtime_*` (5 integration): per-runtime plant
+  + cleanup against a shell-script fixture; verifies files exist
+  mid-session, cleanup on Stop, cleanup on clean exit, child process
+  sees planted env, flag-off path has no filesystem activity.
+- `TestResolveBootDirRoot_*` (3), `TestSanitizeBootDirID` (1).
+- `TestManager_JsonRpcCall_*` (8): happy path, session-not-found,
+  not-capable across three runtime kinds (fake / streaming-stdio /
+  adapter), `*JsonRpcError` pass-through, ctx-cancel against a silent
+  fixture, concurrent sessions (cross-talk check), after-stop returns
+  `ErrSessionNotRunning`.
+
+`go test -race -count=1 -timeout 240s ./...` — green.
+
+### Reference
+
+- ADR: `docs/adr/0001-bootdirspec-absorption-and-manager-jsonrpc-passthrough.md`.
+- Proposal that surfaced both items: `agent-workspaces/execution/agent-mux/v005-05-long-lived-integration/2026-05-11/bootdirspec-absorption-proposal.md`.
+- Portfolio rationale (the 4-mode lifecycle axis that v0.8.0 closed):
+  `agent-workspaces/knowledge/portfolio/cli-agent-long-lived-modes.md`.
+
 ## v0.8.0 — 2026-05-11
 
 Two new long-lived runtime kinds for headless agent sessions that aren't

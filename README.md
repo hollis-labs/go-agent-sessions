@@ -485,19 +485,63 @@ allowlist + SSRF guard.
 
 - **Types** — `Session`, `Runtime`, `StartOptions`, `Capabilities`,
   `HealthStatus`, `LiveState`, `CheckpointHint`, `CheckpointHinter`,
-  `SessionIDer`, `State` (4-value process-level enum).
+  `SessionIDer`, `JsonRpcCaller`, `JsonRpcError`, `State` (4-value
+  process-level enum).
 - **Manager** — `NewManager`, `WithAttachmentSink`, `WithEventSink`,
   `Start`, `Stop`, `Get`, `List`, `Health`, `SendInput`, `Resize`,
-  `Attach`, `AttachWith`, `WaitSession`, `Shutdown`.
+  `JsonRpcCall`, `Attach`, `AttachWith`, `WaitSession`, `Shutdown`.
 - **Sinks** — `StateSink`, `AttachmentSink`, `EventSink`. Defined as
   interfaces; library ships no implementation.
 - **Constructors** — `NewFromAdapter(AdapterRuntimeConfig) (Runtime,
   error)`, `NewFromProvider(ProviderRuntimeConfig) (Runtime, error)`.
 - **Errors** — `ErrTurnInFlight`, `ErrNoInputChannel`,
-  `ErrSessionNotRunning`, `ErrManagerStopped`, `ErrAttachDisabled`.
+  `ErrSessionNotRunning`, `ErrManagerStopped`, `ErrAttachDisabled`,
+  `ErrSessionNotJsonRpcCapable`.
 - **Compliance** — subpackage `compliance`; consumers run `compliance
   .Run(t, compliance.Harness{Runtime: yourRuntime})` to gate adapter
   conformance.
+
+### AutoPlantBootDir (v0.9.0)
+
+When an adapter implements `provider.BootDirProvider`, set
+`StartOptions.AutoPlantBootDir = true` to have the runtime materialize
+the spec's `PlantedFiles` into a per-session tempdir, apply
+`EnvAmendments` / `ProjectDirArg`, set the spawn cwd to
+`spec.SpawnWorkdir(...)`, and remove the tempdir at terminal state.
+For Claude bare-mode adapters, `BareInjectionPaths` is applied to a
+per-session clone of the adapter (preserves concurrency safety).
+
+Knobs:
+
+- `StartOptions.AutoPlantBootDir bool` — feature flag.
+- `StartOptions.BootDirRoot string` — override the tempdir parent
+  (default: `WorkspaceDir+"/boot/"`, falling back to `os.TempDir()`).
+- `StartOptions.OnBootDirPlanted func(path string)` — debug hook.
+- `StartOptions.ExtraArgs []string` — appended after `BuildArgs(...)`.
+  AutoPlantBootDir uses this internally to thread `ProjectDirArg`;
+  consumers may set it directly for non-plant per-session argv
+  injection.
+
+Default `AutoPlantBootDir=false` preserves v0.8.0 behavior exactly.
+The flag is opt-in for v0.9.0; default-on candidate for v0.10.0 once
+consumers migrate off their per-app planters.
+
+### Manager.JsonRpcCall (v0.9.0)
+
+For sessions started via the `jsonRpcStdio` runtime kind, dispatch a
+JSON-RPC 2.0 request through Manager:
+
+```go
+result, err := mgr.JsonRpcCall(ctx, sessionID, "thread.start", params)
+```
+
+Use this in place of `Session.(JsonRpcCaller).Call(...)` when the
+session is Manager-mediated — Manager preserves the supervisor
+invariants (raw `Session` access remains unavailable). Returns
+`ErrSessionNotJsonRpcCapable` if the session exists but its runtime
+kind is not JSON-RPC capable (PTY, streaming-stdio, adapter). The
+existing `SendInput` raw-bytes escape hatch remains available across
+all runtime kinds for callers that want pre-framed bytes.
 
 ## What this library is — and isn't
 
