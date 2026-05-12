@@ -93,6 +93,11 @@ func (r *ptyRuntime) Start(ctx context.Context, opts StartOptions) (Session, err
 	}
 	s.alive.Store(true)
 	s.state.Store(int32(LiveStateIdle))
+	// Pre-seed lastSessionID from preset so ProviderSessionID() returns
+	// the resume id immediately after Start (before any TUI-side init
+	// event lands). Mirrors adapterSession's behavior. Compliance
+	// harness CapsProviderSessionID/PresetCarriedBeforeTurn pins this.
+	s.lastSessionID.Store(opts.SessionIDPreset)
 
 	// First spawn happens synchronously so that BootMode=stdin writes and
 	// AutoFireFirstTurn delivery resolve before Start returns.

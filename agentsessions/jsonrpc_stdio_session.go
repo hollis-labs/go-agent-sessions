@@ -89,6 +89,11 @@ func (r *jsonRpcStdioRuntime) Start(ctx context.Context, opts StartOptions) (Ses
 	}
 	s.alive.Store(true)
 	s.state.Store(int32(LiveStateIdle))
+	// Pre-seed lastSessionID from preset so ProviderSessionID() returns
+	// the resume id immediately after Start (before any session-id
+	// notification lands). Mirrors adapterSession's behavior. Compliance
+	// harness CapsProviderSessionID/PresetCarriedBeforeTurn pins this.
+	s.lastSessionID.Store(opts.SessionIDPreset)
 
 	cmd, stdin, stdout, attemptCleanup, err := s.spawnAttempt(0)
 	if err != nil {

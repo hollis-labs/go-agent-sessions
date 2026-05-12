@@ -2,6 +2,70 @@
 
 All notable changes to `go-agent-sessions` are documented in this file. Per-release notes are also published as GitHub Releases.
 
+## v0.9.1 — 2026-05-11
+
+Bug fix: `ProviderSessionID()` now returns `StartOptions.SessionIDPreset`
+between `Start` and the first agent-observed session id, across all three
+long-lived runtime kinds (`pty` / `streamingStdio` / `jsonRpcStdio`).
+
+### What was broken
+
+The three long-lived sessions stored the most-recent agent-observed
+session id in `s.lastSessionID atomic.Value` and never seeded it from
+`StartOptions.SessionIDPreset` at `Start`. `ProviderSessionID()` returned
+the empty string until the first session-id event landed — typically
+mid-first-turn — which broke any caller that needed the preset to be
+visible immediately (e.g. compliance-harness assertions, dispatch flows
+that read `ProviderSessionID()` between `Start` and the first turn,
+multi-consumer setups where one consumer needs to know the resume id
+before another consumer drives a turn).
+
+`adapterSession` (subprocess-per-turn) was already correct
+(`s.sessionID.Store(opts.SessionIDPreset)` at Start); the three
+long-lived kinds were latent buggy. Mux's flip of the `claude-stream`
+path to `Capabilities.ProviderSessionID = true` exposed it (reported by
+nanite).
+
+### What the fix does
+
+Each long-lived runtime's `Start()` now stores
+`opts.SessionIDPreset` into `s.lastSessionID` immediately after the
+struct is constructed and before any spawn. Storing the empty string
+when no preset was passed is a no-op semantically (the type-assert in
+`ProviderSessionID()` returns `""` for both unset and empty-string
+states).
+
+Restart preservation is unchanged: `spawnAttempt` continues to read
+`lastSessionID` for `attempt > 0` and falls back to the preset when
+empty; pre-seeding makes the fallback unconditional but functionally
+equivalent (the previous code's else-branch already used the preset).
+
+### Compliance harness assertion
+
+`compliance.CapsProviderSessionID/PresetCarriedBeforeTurn` pins this
+invariant — it asserts `ProviderSessionID() == "ses_compliance_preset"`
+immediately after `Start` when `SessionIDPreset` is set. Consumers
+running the compliance harness against their integrated runtime will
+now see this case pass on all four runtime kinds.
+
+### Tests
+
+- `TestProviderSessionID_PresetCarriedBeforeTurn` — new lib-level
+  regression guard with four subtests (`streamingStdio` /
+  `jsonRpcStdio` / `pty` / `adapter`). Pre-fix: three subtests fail
+  with `ProviderSessionID() = "" before any turn`. Post-fix: all four
+  green.
+
+`go test -race -count=1 -timeout 240s ./...` — green.
+
+### Reference
+
+- Issue surfaced by nanite during compliance integration after Mux
+  flipped claude-stream's Caps.ProviderSessionID to true.
+- Companion: `decisions_go_agent_sessions_v009_bootdir_and_jsonrpc`
+  (v0.9.0 decisions, unchanged).
+- Tag: `v0.9.1`.
+
 ## v0.9.0 — 2026-05-11
 
 Two additive lib improvements: BootDirSpec planting absorbed into the

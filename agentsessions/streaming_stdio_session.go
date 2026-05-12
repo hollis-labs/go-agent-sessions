@@ -88,6 +88,12 @@ func (r *streamingStdioRuntime) Start(ctx context.Context, opts StartOptions) (S
 	}
 	s.alive.Store(true)
 	s.state.Store(int32(LiveStateIdle))
+	// Pre-seed lastSessionID from preset so ProviderSessionID() returns
+	// the resume id immediately after Start (before any agent-side
+	// session/init event lands). Mirrors adapterSession's behavior.
+	// Compliance harness CapsProviderSessionID/PresetCarriedBeforeTurn
+	// pins this invariant.
+	s.lastSessionID.Store(opts.SessionIDPreset)
 
 	cmd, stdin, stdout, attemptCleanup, err := s.spawnAttempt(0)
 	if err != nil {
