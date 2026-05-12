@@ -5,8 +5,8 @@ github.com/hollis-labs/go-llm-contracts v0.1.0 h1:AzN35sz1vwXzClgHpx3SWede+U5TiR
 github.com/hollis-labs/go-llm-contracts v0.1.0/go.mod h1:msDaHCBEemyTbXhk0Q8lm5doK79aWK5VR/hdzjWgqbU=
 github.com/hollis-labs/go-llm-types v0.1.0 h1:Scdj2p/nKwOQYScDERLPbV4kFtN0p/t4nSWWjK0IW7c=
 github.com/hollis-labs/go-llm-types v0.1.0/go.mod h1:BP8FMqmTWvi2vQ7dNybTGJ+FFzXS4gMMhAjyTHlNq84=
-github.com/hollis-labs/go-providers v0.12.0 h1:lVJwhbF0VT+I23uCD3QugFw4dz+tZ+wV+knpZw/UVLY=
-github.com/hollis-labs/go-providers v0.12.0/go.mod h1:Y0WQHyW7gIj0ooxyvq2uDqnEHAyOOqVhB2miNiajZ2Q=
+github.com/hollis-labs/go-providers v0.16.0 h1:wsoO+q5Z2A2KA7YYrFQ0zm74PmleDUVpahKisdIhzw8=
+github.com/hollis-labs/go-providers v0.16.0/go.mod h1:Y0WQHyW7gIj0ooxyvq2uDqnEHAyOOqVhB2miNiajZ2Q=
 github.com/hollis-labs/go-runner v0.4.0 h1:NtfdvcugeOtCBzKnjIPNq7oMWhvcaQ3nWveyHWqX+CA=
 github.com/hollis-labs/go-runner v0.4.0/go.mod h1:FNh0ZK9n70m5k5kz6nCDRKLP/ukY0JK/weDt6c4NloI=
 github.com/hollis-labs/go-sandbox v0.1.0 h1:OESqWfu5OPq7s9bsu5BoGfOTf/m6EOig3/MKGbFXvog=

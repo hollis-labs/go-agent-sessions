@@ -288,6 +288,25 @@ type StartOptions struct {
 	// Added in v0.9.3.
 	BootContent string
 
+	// PlantContext, when non-zero, supplies caller-owned
+	// provider.PlantContext fields the lib does not manage. Used only under
+	// AutoPlantBootDir.
+	//
+	// The lib overrides four fields regardless of what the caller sets here:
+	// SystemPrompt from BootPrompt, BootContent from BootContent (falling
+	// back to BootPrompt), ProjectDir from Workdir, and BootDir from the
+	// absolute path of the planted dir.
+	//
+	// Caller-owned fields flow through verbatim, including AgentName,
+	// MCPLoopbackURL, MuxCommand, MuxArgs, and MuxEnv. Future
+	// provider.PlantContext fields flow through automatically as renderers
+	// begin consuming them.
+	//
+	// Default zero value preserves v0.9.0–v0.9.3 behavior exactly.
+	//
+	// Added in v0.9.4.
+	PlantContext provider.PlantContext
+
 	// BootMode is a free-form mode token interpreted by the adapter
 	// (e.g. "interactive", "noninteractive", "review"). Adapter-defined.
 	BootMode string

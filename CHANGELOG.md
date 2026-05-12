@@ -2,6 +2,47 @@
 
 All notable changes to `go-agent-sessions` are documented in this file. Per-release notes are also published as GitHub Releases.
 
+## v0.9.4 — 2026-05-12
+
+Adds `StartOptions.PlantContext` so `AutoPlantBootDir` consumers can pass
+caller-owned `provider.PlantContext` fields through to per-provider bootdir
+renderers.
+
+### What it does
+
+`preparePlant` now starts from the caller-supplied `PlantContext` and then
+overrides the four fields the library owns:
+
+- `PlantContext.SystemPrompt` ← `StartOptions.BootPrompt`
+- `PlantContext.BootContent` ← `StartOptions.BootContent`, falling back to
+  `StartOptions.BootPrompt`
+- `PlantContext.ProjectDir` ← `StartOptions.Workdir`
+- `PlantContext.BootDir` ← the absolute planted bootdir path
+
+Caller-owned fields flow through verbatim, including `AgentName`,
+`MCPLoopbackURL`, `MuxCommand`, `MuxArgs`, and `MuxEnv`. Future
+`provider.PlantContext` fields also flow through automatically as
+go-providers renderers begin consuming them.
+
+### Why it exists
+
+Surfaced by clockwork-manifold's adoption sprint (`CW-20260512-0125`).
+Clockwork keys its per-task MCP surface on `MCPLoopbackURL`; v0.9.0–v0.9.3
+constructed a fresh `PlantContext` inside `preparePlant`, so the loopback
+URL and Mux MCP entry fields were dropped during `AutoPlantBootDir`.
+
+### Compatibility
+
+Strictly additive. The zero-value `PlantContext` preserves v0.9.0–v0.9.3
+behavior exactly, and callers that use only `BootPrompt` / `BootContent`
+continue to receive the same rendered context. Mux's current callers do not
+need changes.
+
+Regression-guarded by
+`TestPreparePlant_PlantContextOverlay_FlowsThrough_To_Renderer`,
+`TestPreparePlant_PlantContextOverlay_LibFieldsOverridden`, and
+`TestPreparePlant_PlantContextOverlay_Empty_NoChange`.
+
 ## v0.9.3 — 2026-05-12
 
 Adds `StartOptions.BootContent` so consumers can pass distinct values for

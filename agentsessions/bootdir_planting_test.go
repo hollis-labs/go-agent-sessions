@@ -594,3 +594,150 @@ func TestPreparePlant_BootContent_Empty_FallsBack_To_BootPrompt(t *testing.T) {
 		t.Errorf("captured[0].BootContent = %q, want %q (fallback)", captured[0].BootContent, "single-conflated-prompt")
 	}
 }
+
+func TestPreparePlant_PlantContextOverlay_FlowsThrough_To_Renderer(t *testing.T) {
+	root := t.TempDir()
+	var captured []provider.PlantContext
+	adapter := &fakeBootDirAdapter{
+		name: "fake",
+		spec: provider.BootDirSpec{
+			PlantedFiles: []provider.PlantedFile{
+				{RelPath: "CLAUDE.md", Render: captureContext(&captured, "x")},
+			},
+		},
+	}
+	opts := StartOptions{
+		Workdir:          "/tmp/proj",
+		AutoPlantBootDir: true,
+		BootDirRoot:      root,
+		BootPrompt:       "persona-system-prompt",
+		BootContent:      "per-task-kickoff",
+		PlantContext: provider.PlantContext{
+			AgentName:      "executor",
+			MCPLoopbackURL: "http://127.0.0.1:54321/mcp",
+			MuxCommand:     "/usr/local/bin/mux",
+			MuxArgs:        []string{"mcp", "--proxy"},
+			MuxEnv:         []string{"MUX_TOKEN=local-dev"},
+		},
+	}
+
+	bootDir, _, _, err := preparePlant(opts, adapter, "test")
+	if err != nil {
+		t.Fatalf("preparePlant err: %v", err)
+	}
+	defer cleanupBootDir(bootDir)
+
+	if len(captured) != 1 {
+		t.Fatalf("captured %d contexts, want 1", len(captured))
+	}
+	ctx := captured[0]
+	if ctx.AgentName != "executor" {
+		t.Errorf("AgentName = %q, want %q", ctx.AgentName, "executor")
+	}
+	if ctx.MCPLoopbackURL != "http://127.0.0.1:54321/mcp" {
+		t.Errorf("MCPLoopbackURL = %q, want %q", ctx.MCPLoopbackURL, "http://127.0.0.1:54321/mcp")
+	}
+	if ctx.MuxCommand != "/usr/local/bin/mux" {
+		t.Errorf("MuxCommand = %q, want %q", ctx.MuxCommand, "/usr/local/bin/mux")
+	}
+	if got, want := strings.Join(ctx.MuxArgs, "\x00"), strings.Join([]string{"mcp", "--proxy"}, "\x00"); got != want {
+		t.Errorf("MuxArgs = %#v, want %#v", ctx.MuxArgs, []string{"mcp", "--proxy"})
+	}
+	if got, want := strings.Join(ctx.MuxEnv, "\x00"), "MUX_TOKEN=local-dev"; got != want {
+		t.Errorf("MuxEnv = %#v, want %#v", ctx.MuxEnv, []string{"MUX_TOKEN=local-dev"})
+	}
+}
+
+func TestPreparePlant_PlantContextOverlay_LibFieldsOverridden(t *testing.T) {
+	root := t.TempDir()
+	var captured []provider.PlantContext
+	adapter := &fakeBootDirAdapter{
+		name: "fake",
+		spec: provider.BootDirSpec{
+			PlantedFiles: []provider.PlantedFile{
+				{RelPath: "CLAUDE.md", Render: captureContext(&captured, "x")},
+			},
+		},
+	}
+	opts := StartOptions{
+		Workdir:          "/tmp/proj",
+		AutoPlantBootDir: true,
+		BootDirRoot:      root,
+		BootPrompt:       "persona-system-prompt",
+		BootContent:      "per-task-kickoff",
+		PlantContext: provider.PlantContext{
+			SystemPrompt: "caller-set-system",
+			BootContent:  "caller-set-boot",
+			ProjectDir:   "/caller/project",
+			BootDir:      "/caller/boot",
+		},
+	}
+
+	bootDir, _, _, err := preparePlant(opts, adapter, "test")
+	if err != nil {
+		t.Fatalf("preparePlant err: %v", err)
+	}
+	defer cleanupBootDir(bootDir)
+
+	if len(captured) != 1 {
+		t.Fatalf("captured %d contexts, want 1", len(captured))
+	}
+	ctx := captured[0]
+	if ctx.SystemPrompt != "persona-system-prompt" {
+		t.Errorf("SystemPrompt = %q, want %q", ctx.SystemPrompt, "persona-system-prompt")
+	}
+	if ctx.BootContent != "per-task-kickoff" {
+		t.Errorf("BootContent = %q, want %q", ctx.BootContent, "per-task-kickoff")
+	}
+	if ctx.ProjectDir != "/tmp/proj" {
+		t.Errorf("ProjectDir = %q, want %q", ctx.ProjectDir, "/tmp/proj")
+	}
+	if ctx.BootDir != bootDir {
+		t.Errorf("BootDir = %q, want planted bootDir %q", ctx.BootDir, bootDir)
+	}
+}
+
+func TestPreparePlant_PlantContextOverlay_Empty_NoChange(t *testing.T) {
+	root := t.TempDir()
+	var captured []provider.PlantContext
+	adapter := &fakeBootDirAdapter{
+		name: "fake",
+		spec: provider.BootDirSpec{
+			PlantedFiles: []provider.PlantedFile{
+				{RelPath: "CLAUDE.md", Render: captureContext(&captured, "x")},
+			},
+		},
+	}
+	opts := StartOptions{
+		Workdir:          "/tmp/proj",
+		AutoPlantBootDir: true,
+		BootDirRoot:      root,
+		BootPrompt:       "single-conflated-prompt",
+	}
+
+	bootDir, _, _, err := preparePlant(opts, adapter, "test")
+	if err != nil {
+		t.Fatalf("preparePlant err: %v", err)
+	}
+	defer cleanupBootDir(bootDir)
+
+	if len(captured) != 1 {
+		t.Fatalf("captured %d contexts, want 1", len(captured))
+	}
+	ctx := captured[0]
+	if ctx.SystemPrompt != "single-conflated-prompt" {
+		t.Errorf("SystemPrompt = %q, want %q", ctx.SystemPrompt, "single-conflated-prompt")
+	}
+	if ctx.BootContent != "single-conflated-prompt" {
+		t.Errorf("BootContent = %q, want %q", ctx.BootContent, "single-conflated-prompt")
+	}
+	if ctx.ProjectDir != "/tmp/proj" {
+		t.Errorf("ProjectDir = %q, want %q", ctx.ProjectDir, "/tmp/proj")
+	}
+	if ctx.BootDir != bootDir {
+		t.Errorf("BootDir = %q, want planted bootDir %q", ctx.BootDir, bootDir)
+	}
+	if ctx.AgentName != "" || ctx.MCPLoopbackURL != "" || ctx.MuxCommand != "" || len(ctx.MuxArgs) != 0 || len(ctx.MuxEnv) != 0 {
+		t.Errorf("caller-owned fields should stay zero-valued: %#v", ctx)
+	}
+}

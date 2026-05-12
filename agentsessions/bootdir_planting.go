@@ -59,12 +59,11 @@ func preparePlant(opts StartOptions, adapter provider.CLIAdapter, runtimeID stri
 		// agent persona from per-task kickoff set BootContent explicitly.
 		bootContent = opts.BootPrompt
 	}
-	plantCtx := provider.PlantContext{
-		SystemPrompt: opts.BootPrompt,
-		BootContent:  bootContent,
-		ProjectDir:   projectDir,
-		BootDir:      dir,
-	}
+	plantCtx := opts.PlantContext
+	plantCtx.SystemPrompt = opts.BootPrompt
+	plantCtx.BootContent = bootContent
+	plantCtx.ProjectDir = projectDir
+	plantCtx.BootDir = dir
 
 	for _, pf := range spec.PlantedFiles {
 		path := filepath.Join(dir, pf.RelPath)
