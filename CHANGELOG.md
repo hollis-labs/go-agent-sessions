@@ -2,6 +2,86 @@
 
 All notable changes to `go-agent-sessions` are documented in this file. Per-release notes are also published as GitHub Releases.
 
+## v0.9.2 — 2026-05-11
+
+Diagnostic-only patch: lib-side logging when a long-lived runtime's
+`cmd.Wait()` return signature looks suspicious. No behavior change for
+healthy sessions; no API surface added.
+
+### What it logs
+
+A single `log.Printf` line is emitted on the failure path of each
+long-lived runtime's waiter (legacy + supervised) when either:
+
+- `cmd.Wait()` returns a non-`*exec.ExitError` (indicating an OS-level
+  wait failure rather than a clean child-exit), OR
+- The elapsed time between spawn and `cmd.Wait` return is < 1 second
+  (the "instant exit" symptom).
+
+Log shape (stable, grep-friendly):
+
+```
+agentsessions: <kind> waiter abnormal: session=<runtime-id> pid=<pid> elapsed=<dur> err_type=<go-type> err=<quoted-msg>
+```
+
+Where `<kind>` is one of `pty` / `streaming-stdio` / `jsonrpc-stdio`.
+
+Healthy long-lived sessions (clean exit, elapsed >= 1s) produce **no
+log output**. The diagnostic is failure-only by design — operators
+running production daemons get high-signal stderr lines for the bug
+class without noise during normal operation.
+
+### Why it exists
+
+Mux reported a streaming-stdio session transitioning launching → running
+→ failed with `exit_code=-1` within ~10ms of launch, while the spawned
+agent process remained alive (verified via `ps` + parent-PID check).
+`exit_code=-1` comes from the legacy waiter's `default` branch (non-
+`*exec.ExitError` from `cmd.Wait`) but the actual `waitErr` was stored
+into `s.waitErr atomic.Value` without any logging — invisible to
+operators not capturing `Manager.WaitSession`'s return.
+
+The diagnostic surfaces the actual error string and timing so the
+underlying cause (likely a wrapper script that forks instead of execs
+the agent, leaving an orphan; or sandbox/resource-limit wrapping that
+detaches from the lib's child view) becomes diagnosable from stderr
+alone.
+
+### Implementation
+
+- New file `agentsessions/diagnostics.go`: `logAbnormalWait(kind,
+  runtimeID, pid, elapsed, err)` helper. Centralizes the gating
+  logic so all three long-lived runtimes log with identical shape.
+- New `spawnedAt atomic.Int64` field on `ptySession`,
+  `streamingStdioSession`, `jsonRpcStdioSession` — set in
+  `spawnAttempt` right after the process starts.
+- Each runtime's legacy waiter and supervised `waitOnceSupervised`
+  call `logAbnormalWait(...)` after `cmd.Wait()` returns. Wired in
+  six total spots (3 runtimes × 2 paths).
+
+### Tests
+
+- `TestLogAbnormalWait` — covers all six gating cases: clean-exit/
+  healthy-duration (no log), `*exec.ExitError`/healthy (no log),
+  non-exit-error/healthy (log), clean-exit/rapid (log), non-exit-
+  error/rapid (log, single line), zero-elapsed (no log — `spawnedAt`
+  was never set).
+
+`go test -race -count=1 -timeout 240s ./...` — green.
+
+### Reference
+
+- Surfaced by: Mux's "session reported failed, exit_code=-1 within
+  ~10ms, but spawned process alive afterward" report on
+  `streamingStdioSession`.
+- This is a diagnostic patch, not a fix. The actual root cause
+  surfaces in the new log lines once Mux deploys against v0.9.2. The
+  follow-up fix (likely a wrapper-script `exec` vs `fork` correction
+  in Mux's catalog binary path, OR a lib-level guard against orphan-
+  spawning binaries) lands in v0.9.3 or v0.10.0 once diagnosed.
+- Companion: `decisions_go_agent_sessions_v091_providersessionid_preseed`
+  (v0.9.1, unrelated bug fix on the same release line).
+
 ## v0.9.1 — 2026-05-11
 
 Bug fix: `ProviderSessionID()` now returns `StartOptions.SessionIDPreset`

@@ -198,6 +198,11 @@ type ptySession struct {
 	alive      atomic.Bool
 	startedPID atomic.Int32 // PID at first start; stable across the session
 	lastPID    atomic.Int32 // PID of most-recent process (== startedPID for PTY)
+	// spawnedAt is the most-recent successful pty.Start time as unix
+	// nanoseconds. Set inside spawnAttempt after pty.Start; read by the
+	// waiter paths to compute elapsed-since-spawn for the abnormal-wait
+	// diagnostic. Zero before the first attempt.
+	spawnedAt atomic.Int64
 
 	// lastSessionID stores the most-recently observed provider session ID
 	// from EventSessionID. Used by the supervised restart path to feed
@@ -306,6 +311,7 @@ func (s *ptySession) spawnAttempt(attempt int) (*exec.Cmd, *os.File, func(), err
 		}
 		s.lastPID.Store(int32(cmd.Process.Pid))
 	}
+	s.spawnedAt.Store(time.Now().UnixNano())
 
 	if attempt == 0 && s.opts.BootMode == "stdin" && s.opts.BootPrompt != "" {
 		if _, werr := io.WriteString(ptmx, s.opts.BootPrompt); werr != nil {
@@ -408,6 +414,16 @@ func (s *ptySession) runReaderLoop(ptmx *os.File) {
 func (s *ptySession) spawnWaiterLegacy(ptmx *os.File, cmd *exec.Cmd) {
 	go func() {
 		err := cmd.Wait()
+
+		pid := 0
+		if cmd.Process != nil {
+			pid = cmd.Process.Pid
+		}
+		elapsed := time.Duration(0)
+		if t0 := s.spawnedAt.Load(); t0 > 0 {
+			elapsed = time.Since(time.Unix(0, t0))
+		}
+		logAbnormalWait("pty", s.runtime.cfg.ID, pid, elapsed, err)
 
 		s.ptmxLock.Lock()
 		s.ptmx = nil
@@ -602,6 +618,16 @@ func (s *ptySession) waitOnceSupervised(ctx context.Context, cmd *exec.Cmd, ptmx
 	close(procDone)
 	supWG.Wait()
 	<-stopWatcherDone
+
+	pid := 0
+	if cmd.Process != nil {
+		pid = cmd.Process.Pid
+	}
+	elapsed := time.Duration(0)
+	if t0 := s.spawnedAt.Load(); t0 > 0 {
+		elapsed = time.Since(time.Unix(0, t0))
+	}
+	logAbnormalWait("pty", s.runtime.cfg.ID, pid, elapsed, waitErr)
 
 	// Nil-clear ptmx so in-flight SendInput / Resize sees ErrNoInputChannel
 	// before the close runs. Close unblocks the reader's scanner.

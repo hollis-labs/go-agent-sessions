@@ -174,6 +174,11 @@ type streamingStdioSession struct {
 	alive      atomic.Bool
 	startedPID atomic.Int32
 	lastPID    atomic.Int32
+	// spawnedAt is the most-recent successful cmd.Start time as unix
+	// nanoseconds. Set inside spawnAttempt after cmd.Start; read by the
+	// waiter paths to compute elapsed-since-spawn for the abnormal-wait
+	// diagnostic. Zero before the first attempt.
+	spawnedAt atomic.Int64
 
 	lastSessionID atomic.Value // string
 
@@ -293,6 +298,7 @@ func (s *streamingStdioSession) spawnAttempt(attempt int) (*exec.Cmd, io.WriteCl
 		}
 		s.lastPID.Store(int32(cmd.Process.Pid))
 	}
+	s.spawnedAt.Store(time.Now().UnixNano())
 
 	if attempt == 0 && s.opts.BootMode == "stdin" && s.opts.BootPrompt != "" {
 		// Caller frames the boot prompt — we append nothing here. SendInput
@@ -382,6 +388,16 @@ func (s *streamingStdioSession) runReaderLoop(stdout io.Reader) {
 func (s *streamingStdioSession) spawnWaiterLegacy(cmd *exec.Cmd, stdin io.WriteCloser, stdout io.ReadCloser) {
 	go func() {
 		err := cmd.Wait()
+
+		pid := 0
+		if cmd.Process != nil {
+			pid = cmd.Process.Pid
+		}
+		elapsed := time.Duration(0)
+		if t0 := s.spawnedAt.Load(); t0 > 0 {
+			elapsed = time.Since(time.Unix(0, t0))
+		}
+		logAbnormalWait("streaming-stdio", s.runtime.cfg.ID, pid, elapsed, err)
 
 		s.ioLock.Lock()
 		s.stdin = nil
@@ -544,6 +560,16 @@ func (s *streamingStdioSession) waitOnceSupervised(ctx context.Context, cmd *exe
 	close(procDone)
 	supWG.Wait()
 	<-stopWatcherDone
+
+	pid := 0
+	if cmd.Process != nil {
+		pid = cmd.Process.Pid
+	}
+	elapsed := time.Duration(0)
+	if t0 := s.spawnedAt.Load(); t0 > 0 {
+		elapsed = time.Since(time.Unix(0, t0))
+	}
+	logAbnormalWait("streaming-stdio", s.runtime.cfg.ID, pid, elapsed, waitErr)
 
 	s.ioLock.Lock()
 	s.stdin = nil
