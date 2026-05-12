@@ -51,9 +51,17 @@ func preparePlant(opts StartOptions, adapter provider.CLIAdapter, runtimeID stri
 	}
 
 	projectDir := opts.Workdir
+	bootContent := opts.BootContent
+	if bootContent == "" {
+		// Back-compat with v0.9.0–v0.9.2 callers that set only BootPrompt:
+		// fall back so renderers receive the same value for both fields,
+		// preserving the conflated behavior. Consumers that distinguish
+		// agent persona from per-task kickoff set BootContent explicitly.
+		bootContent = opts.BootPrompt
+	}
 	plantCtx := provider.PlantContext{
 		SystemPrompt: opts.BootPrompt,
-		BootContent:  opts.BootPrompt,
+		BootContent:  bootContent,
 		ProjectDir:   projectDir,
 		BootDir:      dir,
 	}

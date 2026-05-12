@@ -2,6 +2,56 @@
 
 All notable changes to `go-agent-sessions` are documented in this file. Per-release notes are also published as GitHub Releases.
 
+## v0.9.3 — 2026-05-12
+
+Adds `StartOptions.BootContent` so consumers can pass distinct values for
+the persona system prompt (rendered into CLAUDE.md / AGENTS.md /
+agents/<name>.md) and the per-task kickoff body (rendered into boot.md
+and referenced from the system prompt via `@./boot.md`).
+
+### What it does
+
+`AutoPlantBootDir` now plumbs two distinct fields into the per-provider
+`PlantContext`:
+
+- `PlantContext.SystemPrompt` ← `StartOptions.BootPrompt` (unchanged)
+- `PlantContext.BootContent`  ← `StartOptions.BootContent`, falling back
+  to `StartOptions.BootPrompt` when `BootContent` is empty.
+
+Per-provider renderers in go-providers (`bootdir_claude.go`,
+`bootdir_codex.go`, `bootdir_opencode.go`) already consume
+`ctx.SystemPrompt` and `ctx.BootContent` as separate inputs; v0.9.0–v0.9.2
+fed both fields the same `BootPrompt` value, which forced consumers to
+either conflate the two (Mux pattern) or skip `AutoPlantBootDir`
+adoption entirely (clockwork's blocker).
+
+### Why it exists
+
+Surfaced by clockwork-manifold's `go-agent-sessions v0.9.x` adoption
+sprint. Clockwork's per-task agent boot pattern distinguishes:
+
+- **Agent identity** (`composeSystemPrompt` — persona + inherited
+  project context, durable, planted into CLAUDE.md and auto-reloaded
+  post-compaction).
+- **Task scope** (`kickoffMarkdown` — per-run instructions, planted into
+  boot.md and re-anchored post-compaction via the `@./boot.md`
+  reference from the system prompt).
+
+Conflating the two would either bloat CLAUDE.md with stale per-task
+text after compaction or strip the persona from the agent's first turn.
+Mux's single-prompt pipeline doesn't need the split; clockwork's does.
+
+### Compatibility
+
+Strictly additive. v0.9.0–v0.9.2 callers that set only `BootPrompt`
+keep their existing behavior verbatim (the empty-`BootContent`
+fallback). Mux's `LaunchSession` site at `internal/app/service.go`
+needs no changes; clockwork-manifold's adoption sprint sets both fields
+explicitly.
+
+Regression-guarded by `TestPreparePlant_BootContent_Distinct_FromBootPrompt`
+and `TestPreparePlant_BootContent_Empty_FallsBack_To_BootPrompt`.
+
 ## v0.9.2 — 2026-05-11
 
 Diagnostic-only patch: lib-side logging when a long-lived runtime's

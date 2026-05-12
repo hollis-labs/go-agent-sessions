@@ -498,3 +498,99 @@ func TestSanitizeBootDirID(t *testing.T) {
 func staticContent(s string) func(provider.PlantContext) (string, error) {
 	return func(provider.PlantContext) (string, error) { return s, nil }
 }
+
+// captureContext returns a renderer that records every PlantContext passed
+// to it into the supplied slice (in PlantedFile order). Used to assert what
+// the lib actually feeds the per-provider Render closures, not just what the
+// final files contain.
+func captureContext(out *[]provider.PlantContext, body string) func(provider.PlantContext) (string, error) {
+	return func(ctx provider.PlantContext) (string, error) {
+		*out = append(*out, ctx)
+		return body, nil
+	}
+}
+
+// TestPreparePlant_BootContent_Distinct_FromBootPrompt confirms that when
+// callers set BootPrompt and BootContent to different values, the renderer
+// receives them as distinct PlantContext fields. This is the load-bearing
+// behavior for consumers (clockwork) that distinguish persona context
+// (CLAUDE.md / AGENTS.md) from per-task kickoff (boot.md).
+func TestPreparePlant_BootContent_Distinct_FromBootPrompt(t *testing.T) {
+	root := t.TempDir()
+	var captured []provider.PlantContext
+	adapter := &fakeBootDirAdapter{
+		name: "fake",
+		spec: provider.BootDirSpec{
+			PlantedFiles: []provider.PlantedFile{
+				{RelPath: "CLAUDE.md", Render: captureContext(&captured, "claude-md-body")},
+				{RelPath: "boot.md", Render: captureContext(&captured, "boot-md-body")},
+			},
+		},
+	}
+	opts := StartOptions{
+		Workdir:          "/tmp/proj",
+		AutoPlantBootDir: true,
+		BootDirRoot:      root,
+		BootPrompt:       "persona-system-prompt",
+		BootContent:      "per-task-kickoff",
+	}
+
+	bootDir, _, _, err := preparePlant(opts, adapter, "test")
+	if err != nil {
+		t.Fatalf("preparePlant err: %v", err)
+	}
+	defer cleanupBootDir(bootDir)
+
+	if len(captured) != 2 {
+		t.Fatalf("captured %d contexts, want 2", len(captured))
+	}
+	for i, ctx := range captured {
+		if ctx.SystemPrompt != "persona-system-prompt" {
+			t.Errorf("captured[%d].SystemPrompt = %q, want %q", i, ctx.SystemPrompt, "persona-system-prompt")
+		}
+		if ctx.BootContent != "per-task-kickoff" {
+			t.Errorf("captured[%d].BootContent = %q, want %q", i, ctx.BootContent, "per-task-kickoff")
+		}
+	}
+}
+
+// TestPreparePlant_BootContent_Empty_FallsBack_To_BootPrompt confirms back-
+// compat with v0.9.0–v0.9.2 callers (Mux et al) that conflate persona and
+// kickoff into a single BootPrompt value. When BootContent is empty, the
+// renderer must see BootPrompt for both PlantContext.SystemPrompt and
+// PlantContext.BootContent — preserving the conflated behavior exactly.
+func TestPreparePlant_BootContent_Empty_FallsBack_To_BootPrompt(t *testing.T) {
+	root := t.TempDir()
+	var captured []provider.PlantContext
+	adapter := &fakeBootDirAdapter{
+		name: "fake",
+		spec: provider.BootDirSpec{
+			PlantedFiles: []provider.PlantedFile{
+				{RelPath: "CLAUDE.md", Render: captureContext(&captured, "x")},
+			},
+		},
+	}
+	opts := StartOptions{
+		Workdir:          "/tmp/proj",
+		AutoPlantBootDir: true,
+		BootDirRoot:      root,
+		BootPrompt:       "single-conflated-prompt",
+		// BootContent intentionally unset.
+	}
+
+	bootDir, _, _, err := preparePlant(opts, adapter, "test")
+	if err != nil {
+		t.Fatalf("preparePlant err: %v", err)
+	}
+	defer cleanupBootDir(bootDir)
+
+	if len(captured) != 1 {
+		t.Fatalf("captured %d contexts, want 1", len(captured))
+	}
+	if captured[0].SystemPrompt != "single-conflated-prompt" {
+		t.Errorf("captured[0].SystemPrompt = %q, want %q", captured[0].SystemPrompt, "single-conflated-prompt")
+	}
+	if captured[0].BootContent != "single-conflated-prompt" {
+		t.Errorf("captured[0].BootContent = %q, want %q (fallback)", captured[0].BootContent, "single-conflated-prompt")
+	}
+}

@@ -267,7 +267,26 @@ type StartOptions struct {
 
 	// BootPrompt is the initial system / boot prompt the adapter feeds
 	// to the underlying agent on first start. Adapter-defined.
+	//
+	// Under AutoPlantBootDir, this populates provider.PlantContext.SystemPrompt
+	// (the durable, always-loaded persona content rendered into CLAUDE.md /
+	// AGENTS.md / agents/<name>.md by the per-provider BootDirSpec renderers).
 	BootPrompt string
+
+	// BootContent is the per-task kickoff body the adapter plants into the
+	// transient boot file (boot.md / equivalent) referenced from the system
+	// prompt via `@./boot.md`. Distinct from BootPrompt so consumers can
+	// separate agent identity (durable, survives compaction via auto-reload
+	// of CLAUDE.md) from task scope (per-run instructions re-anchored after
+	// compaction via the @-reference).
+	//
+	// Only consulted under AutoPlantBootDir. Populates
+	// provider.PlantContext.BootContent. When empty, the runtime falls back
+	// to BootPrompt for back-compat with consumers that conflate the two
+	// (the v0.9.0–v0.9.2 behavior). Adapter-defined.
+	//
+	// Added in v0.9.3.
+	BootContent string
 
 	// BootMode is a free-form mode token interpreted by the adapter
 	// (e.g. "interactive", "noninteractive", "review"). Adapter-defined.
