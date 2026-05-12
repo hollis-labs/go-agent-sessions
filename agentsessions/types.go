@@ -2,6 +2,7 @@ package agentsessions
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -57,10 +58,32 @@ func (s LiveState) String() string {
 // baseline Runtime + Session contract. All fields default to false. Caps
 // returns the static capability declaration; the value is immutable for
 // the Runtime's lifetime and safe to call concurrently.
+//
+// Lifecycle flags (PTY / StreamingStdio / JsonRpcStdio) are mutually
+// exclusive — at most one may be true for a given Capabilities value.
+// NewFromAdapter validates this at construction time. When none of the
+// three are set, the adapter runtime (subprocess-per-turn) is selected.
 type Capabilities struct {
 	// PTY: Session.SendInput writes to a live PTY master. Resize is
-	// meaningful. False for turn-based subprocess adapters.
+	// meaningful. False for turn-based subprocess adapters. Selects the
+	// long-lived PTY runtime kind; mutually exclusive with StreamingStdio
+	// and JsonRpcStdio.
 	PTY bool
+
+	// StreamingStdio: long-lived non-PTY child speaking NDJSON over
+	// stdin/stdout. SendInput writes a frame followed by '\n' to the
+	// child's stdin. Conversation state persists across turns in the
+	// long-lived process (e.g. Claude's stream-json input mode).
+	// Mutually exclusive with PTY and JsonRpcStdio.
+	StreamingStdio bool
+
+	// JsonRpcStdio: long-lived non-PTY child speaking JSON-RPC 2.0 over
+	// stdin/stdout. The runtime layers a JSON-RPC client (id allocator,
+	// pending-request map, notification dispatcher) over raw stdio.
+	// Typed requests go through the runtime's Call(method, params)
+	// surface; SendInput remains as a raw-bytes escape hatch.
+	// Mutually exclusive with PTY and StreamingStdio.
+	JsonRpcStdio bool
 
 	// Resize: Session.Resize has an observable effect. Requires PTY=true
 	// to be meaningful; non-PTY adapters no-op Resize.
@@ -78,6 +101,27 @@ type Capabilities struct {
 	// BinaryRequired: Prepare returns an error if the underlying binary
 	// is absent. False only for in-process providers.
 	BinaryRequired bool
+}
+
+// validateLifecycle returns an error when more than one of the lifecycle
+// flags (PTY, StreamingStdio, JsonRpcStdio) is set. Called by
+// NewFromAdapter to reject ambiguous runtime selection at construction
+// time rather than silently preferring one flag.
+func (c Capabilities) validateLifecycle() error {
+	n := 0
+	if c.PTY {
+		n++
+	}
+	if c.StreamingStdio {
+		n++
+	}
+	if c.JsonRpcStdio {
+		n++
+	}
+	if n > 1 {
+		return errors.New("agentsessions: Capabilities declares more than one lifecycle flag (PTY / StreamingStdio / JsonRpcStdio); at most one may be true")
+	}
+	return nil
 }
 
 // HealthStatus snapshots a live session's liveness. PID is meaningful
@@ -112,6 +156,59 @@ type CheckpointHinter interface {
 // the core Session contract.
 type SessionIDer interface {
 	ProviderSessionID() string
+}
+
+// JsonRpcCaller is the optional interface a Session implements when the
+// runtime speaks JSON-RPC 2.0 over its stdio channel
+// (Caps().JsonRpcStdio == true). Call sends a typed request, blocks on
+// the response (or ctx.Done()), and returns the raw result envelope.
+// Errors from the JSON-RPC error response shape are returned as a
+// *JsonRpcError so callers can introspect code / message / data via
+// errors.As. Callers must type-assert to this interface; it is not part
+// of the core Session contract.
+type JsonRpcCaller interface {
+	Call(ctx context.Context, method string, params any) (json.RawMessage, error)
+}
+
+// JsonRpcError is the structured form of a JSON-RPC 2.0 error response
+// (per the spec's error object: code int, message string, optional data).
+// Returned by JsonRpcCaller.Call when the remote returns an error
+// envelope; callers extract via errors.As.
+type JsonRpcError struct {
+	Code    int             `json:"code"`
+	Message string          `json:"message"`
+	Data    json.RawMessage `json:"data,omitempty"`
+}
+
+func (e *JsonRpcError) Error() string {
+	if e == nil {
+		return "<nil>"
+	}
+	return "agentsessions: jsonrpc error " + jsonRpcErrorString(e.Code) + ": " + e.Message
+}
+
+// jsonRpcErrorString is small to avoid pulling fmt into types.go's hot path.
+func jsonRpcErrorString(code int) string {
+	// Minimal int → decimal-string conversion; not perf-critical.
+	if code == 0 {
+		return "0"
+	}
+	negative := code < 0
+	if negative {
+		code = -code
+	}
+	var buf [20]byte
+	pos := len(buf)
+	for code > 0 {
+		pos--
+		buf[pos] = byte('0' + code%10)
+		code /= 10
+	}
+	if negative {
+		pos--
+		buf[pos] = '-'
+	}
+	return string(buf[pos:])
 }
 
 // PIDReporter is an optional Session extension that distinguishes the PID
@@ -308,6 +405,22 @@ type StartOptions struct {
 	//
 	// Added in v0.6.0.
 	Supervisor *SupervisorOptions
+
+	// JsonRpcNotificationHook, when non-nil, is invoked from the
+	// jsonRpcStdioSession reader goroutine for every JSON-RPC notification
+	// (a frame with no `id` field) received from the child. The raw method
+	// name and params are forwarded verbatim; the runtime does no
+	// adapter-specific translation. Consumers that want typed events from
+	// notifications either implement provider.EventParser on the adapter
+	// (the runtime calls ParseLineEvents per-line, identical to the
+	// streaming-stdio path) or do their own decode inside this hook.
+	//
+	// Sends are synchronous; treat the hook like an io.Writer's Write —
+	// keep the work short or hand off to your own goroutine. Default nil
+	// drops notifications (the EventParser path still fires).
+	//
+	// Added in v0.8.0.
+	JsonRpcNotificationHook func(method string, params json.RawMessage)
 
 	// ResourceLimits, when non-nil and non-zero, applies OS-level resource
 	// caps to spawned children (CPU time, virtual memory, open files,

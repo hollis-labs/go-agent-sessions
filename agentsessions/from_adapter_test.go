@@ -469,6 +469,71 @@ func TestAdapterRuntime_TurnInFlight_RejectsConcurrentSendInput(t *testing.T) {
 	}
 }
 
+func TestNewFromAdapter_RejectsMultipleLifecycleFlags(t *testing.T) {
+	cases := []struct {
+		name string
+		caps Capabilities
+	}{
+		{"pty+streaming", Capabilities{PTY: true, StreamingStdio: true}},
+		{"pty+jsonrpc", Capabilities{PTY: true, JsonRpcStdio: true}},
+		{"streaming+jsonrpc", Capabilities{StreamingStdio: true, JsonRpcStdio: true}},
+		{"all-three", Capabilities{PTY: true, StreamingStdio: true, JsonRpcStdio: true}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := NewFromAdapter(AdapterRuntimeConfig{
+				ID:      "mutex-" + tc.name,
+				Kind:    "cli",
+				Adapter: &echoAdapter{script: ""},
+				Caps:    tc.caps,
+			})
+			if err == nil {
+				t.Fatalf("NewFromAdapter accepted mutually-exclusive lifecycle flags %+v", tc.caps)
+			}
+			if !strings.Contains(err.Error(), "lifecycle flag") {
+				t.Errorf("error = %v, want one mentioning 'lifecycle flag'", err)
+			}
+		})
+	}
+}
+
+func TestNewFromAdapter_SingleLifecycleFlagAccepted(t *testing.T) {
+	// Each lifecycle flag in isolation routes to its dedicated runtime;
+	// default (no flags) routes to the subprocess-per-turn adapter runtime.
+	cases := []struct {
+		name        string
+		caps        Capabilities
+		wantErrSubs string // empty when construction should succeed
+	}{
+		{"default-no-flags", Capabilities{}, ""},
+		{"pty-only", Capabilities{PTY: true}, ""},
+		{"streaming-only", Capabilities{StreamingStdio: true}, ""},
+		{"jsonrpc-only", Capabilities{JsonRpcStdio: true}, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := NewFromAdapter(AdapterRuntimeConfig{
+				ID:      "single-" + tc.name,
+				Kind:    "cli",
+				Adapter: &echoAdapter{script: ""},
+				Caps:    tc.caps,
+			})
+			if tc.wantErrSubs == "" {
+				if err != nil {
+					t.Fatalf("NewFromAdapter rejected single-flag caps %+v: %v", tc.caps, err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("NewFromAdapter accepted not-yet-wired caps %+v", tc.caps)
+			}
+			if !strings.Contains(err.Error(), tc.wantErrSubs) {
+				t.Errorf("error = %v, want substring %q", err, tc.wantErrSubs)
+			}
+		})
+	}
+}
+
 func TestAdapterRuntime_PrepareReportsMissingBinary(t *testing.T) {
 	rt, _ := NewFromAdapter(AdapterRuntimeConfig{
 		ID:      "missing",

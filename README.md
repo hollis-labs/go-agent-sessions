@@ -65,6 +65,95 @@ PTY merges stderr into stdout at the kernel level — there is no separable
 stderr stream. Consumers needing stderr separation should use the
 subprocess-per-turn adapter runtime instead.
 
+### Long-lived headless stdio runtimes
+
+Some CLI agents speak a documented, programmatic protocol over their child
+process's stdin/stdout — no TUI, no PTY allocation, no exotic sandbox
+holes — and stay alive across turns with in-process conversation state.
+v0.8.0 wires two such runtimes:
+
+| `Caps` flag | Wire protocol | Target consumer |
+|---|---|---|
+| `StreamingStdio` | NDJSON over stdin/stdout | Claude `claude -p --input-format stream-json --output-format stream-json` |
+| `JsonRpcStdio` | JSON-RPC 2.0 over stdin/stdout | Codex `app-server` (the daemon shape behind OpenAI's VS Code extension) |
+
+Both runtimes share the same supervisor / idle-kill / restart-on-crash /
+watchdog / exit-cause-classification machinery as `ptySession`. Only the
+I/O loop changes. `Capabilities` enforces mutual exclusion between `PTY`,
+`StreamingStdio`, and `JsonRpcStdio` at construction time — at most one
+lifecycle flag may be true; `NewFromAdapter` returns an error otherwise.
+
+#### StreamingStdio (`Caps.StreamingStdio = true`)
+
+```go
+rt, err := agentsessions.NewFromAdapter(agentsessions.AdapterRuntimeConfig{
+    ID:      "claude-stream",
+    Kind:    "cli",
+    Adapter: provider.NewClaudeAdapter(),
+    Caps: agentsessions.Capabilities{
+        StreamingStdio:    true,
+        ProviderSessionID: true,
+        BinaryRequired:    true,
+    },
+})
+sess, _ := rt.Start(ctx, agentsessions.StartOptions{
+    Workdir:           workDir,
+    LogPath:           logPath,
+    AutoFireFirstTurn: true,
+    FirstTurnPayload:  []byte(`{"type":"user","message":{"role":"user","content":"hello"}}`),
+})
+```
+
+`SendInput` writes one frame followed by `'\n'` to stdin under a write
+lock (the runtime appends the newline if missing — callers frame one JSON
+object per call). The reader goroutine scans stdout line by line and
+dispatches each line through the same `Fanout` / `EventFanout` /
+`TypedEventCallback` surfaces the PTY runtime uses. Stderr is routed
+separately to `StartOptions.Stderr` if set, otherwise to the log file
+(unlike PTY, which merges stderr into stdout at the kernel level).
+
+#### JsonRpcStdio (`Caps.JsonRpcStdio = true`)
+
+```go
+rt, err := agentsessions.NewFromAdapter(agentsessions.AdapterRuntimeConfig{
+    ID:      "codex-app-server",
+    Kind:    "cli",
+    Adapter: provider.NewCodexAppServerAdapter(),
+    Caps: agentsessions.Capabilities{
+        JsonRpcStdio:   true,
+        BinaryRequired: true,
+    },
+})
+sess, _ := rt.Start(ctx, agentsessions.StartOptions{
+    Workdir: workDir,
+    LogPath: logPath,
+    JsonRpcNotificationHook: func(method string, params json.RawMessage) {
+        // method == "turn.started" / "item.delta" / "turn.completed" / ...
+    },
+})
+
+caller := sess.(agentsessions.JsonRpcCaller)
+result, err := caller.Call(ctx, "thread.start", map[string]any{"workspace": workDir})
+```
+
+The runtime layers a JSON-RPC 2.0 client on top of raw stdio: id
+allocator, pending-request map, notification dispatcher. `Call(method,
+params)` is the primary API — it encodes a `{"jsonrpc":"2.0","id":...,
+"method":...,"params":...}` frame, writes it to stdin, blocks on the
+matching response, and returns the raw `result` envelope. Error
+responses are returned as `*JsonRpcError` (extract via `errors.As`).
+`ctx.Done()` unblocks `Call` promptly; the in-flight pending entry is
+removed and any late response from the child is dropped.
+
+Notifications (frames with no `id`) flow through `StartOptions.JsonRpcNotificationHook`
+when set. The runtime does no adapter-specific translation — consumers
+that want typed events either implement `provider.EventParser` on the
+adapter (the runtime calls `ParseLineEvents` per-line, same path as
+StreamingStdio) or do their own decode inside the hook.
+
+`SendInput` remains as a raw-bytes escape hatch for callers that need to
+inject pre-framed bytes outside the `Call` path.
+
 ### Two-dir model — Workdir vs WorkspaceDir
 
 The PTY runtime distinguishes the agent's cwd from the lib's persistent

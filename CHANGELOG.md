@@ -2,6 +2,133 @@
 
 All notable changes to `go-agent-sessions` are documented in this file. Per-release notes are also published as GitHub Releases.
 
+## v0.8.0 — 2026-05-11
+
+Two new long-lived runtime kinds for headless agent sessions that aren't
+PTY-driven. Closes the portfolio gap between "subprocess-per-turn"
+(`adapterRuntime`) and "long-lived PTY + TUI" (`ptySession`): vendor-
+documented headless modes that retain in-process conversation state across
+turns but speak a programmatic protocol over stdin/stdout.
+
+### New runtime kinds
+
+- **`streamingStdioSession`** — long-lived child speaking NDJSON over
+  stdin/stdout. Target consumer: Claude `claude -p --input-format
+  stream-json --output-format stream-json --verbose` ("Streaming Input
+  Mode" per Anthropic's Agent SDK docs). Empirically retains kv-cache
+  across turns in the same PID.
+- **`jsonRpcStdioSession`** — long-lived child speaking JSON-RPC 2.0 over
+  stdin/stdout. Target consumer: Codex `app-server` (the same engine that
+  backs OpenAI's VS Code extension). The runtime layers a JSON-RPC client
+  (id allocator, pending-request map, notification dispatcher) on top of
+  raw stdio.
+
+Both reuse the existing supervisor / idle-kill / restart-on-crash /
+watchdog / exit-cause classification primitives. Only the I/O loop is
+new. `ptySession` and `adapterRuntime` are unchanged.
+
+### Capability flags + selection
+
+`Capabilities` gains two booleans:
+
+- `StreamingStdio bool` — selects `streamingStdioRuntime`.
+- `JsonRpcStdio bool` — selects `jsonRpcStdioRuntime`.
+
+`NewFromAdapter` enforces mutual exclusion: at most one of `PTY` /
+`StreamingStdio` / `JsonRpcStdio` may be true; a config that sets more
+than one returns an error. When none are set, the existing subprocess-
+per-turn adapter runtime is selected (no behavior change for current
+callers).
+
+### JSON-RPC client surface
+
+- `JsonRpcCaller` interface: `Call(ctx, method, params) (json.RawMessage, error)`.
+  Sessions produced by `jsonRpcStdioRuntime` implement it; callers type-
+  assert as they do for `SessionIDer` / `PIDReporter`.
+- `JsonRpcError` (typed) — JSON-RPC 2.0 error envelope (`code` /
+  `message` / `data`). Returned by `Call` when the remote returns an
+  error response; extract via `errors.As(err, &rpcErr)`.
+- `StartOptions.JsonRpcNotificationHook func(method string, params json.RawMessage)` —
+  consumer hook for inbound notifications (frames with no `id`). The
+  runtime does no adapter-specific translation. Consumers that want
+  typed events implement `provider.EventParser` on the adapter (same
+  per-line path the streaming runtime uses) or decode raw notifications
+  inside the hook.
+- `SendInput` remains as a raw-bytes escape hatch for both new runtimes;
+  the streaming runtime appends a trailing `'\n'` if absent, matching
+  the PTY runtime's convention.
+
+### Lifecycle parity with PTY
+
+- Supervisor (`SupervisorOptions`) — idle-kill / restart-on-crash /
+  watchdog / `OnRestart` / `ActivityCallback` all apply to both new
+  runtimes via the same goroutine shape as `ptySession`.
+- Restart preserves the provider-side agent session id when
+  `Caps.ProviderSessionID = true` (the most-recently observed id is fed
+  into the next spawn's `BuildArgs` in place of the original
+  `SessionIDPreset`).
+- `Stop` closes stdin first to let well-behaved agents exit cleanly on
+  EOF (a 2-second grace), then escalates to SIGTERM (5-second grace) and
+  finally SIGKILL — friendlier than PTY's immediate SIGTERM since stdio
+  children typically honor EOF.
+- Exit classification (`*ExitError` with `Cause` = `idle_timeout` /
+  `watchdog_kill` / `restart_exhausted` / etc.) is identical to the PTY
+  runtime.
+- `Resize` is a no-op on both new runtimes (no PTY to resize).
+
+### Out of scope
+
+- Removing or changing `ptySession` / `adapterRuntime` — both preserved
+  unchanged.
+- Codex `app-server` argv emission lives in `go-providers` (parallel
+  v0.17 sprint); this library only carries the runtime that consumes it.
+- Unix-socket / websocket transports for JSON-RPC — stdio only this
+  release. The Codex app-server docs mark unix/ws as supported but ws as
+  experimental; stdio is the stable surface.
+- Typed `ThreadStart` / `TurnStart` / `TurnInterrupt` / `TurnSteer`
+  wrappers around `Call` — left to consumer-level Codex helpers; the
+  generic `Call` surface is the spec-compliant baseline.
+- Mux / Nanite / Clockwork integration — lands as drop-in upgrades in
+  follow-up sprints after this release.
+
+### Tests
+
+New race-clean tests against shell-script subprocess fixtures:
+
+- `TestStreamingStdioSession_HappyPath_BootSendInputStop` — session id
+  surface, multi-turn fanout, `CheckpointHints` honor cap.
+- `TestStreamingStdioSession_MultiTurnSameProcess` — two `SendInput`
+  calls serviced by one PID (long-lived contract).
+- `TestStreamingStdioSession_AutoFireFirstTurn` — kickoff payload
+  delivered synchronously on `Start`.
+- `TestStreamingStdioSession_StopClosesStdinAndExits` — clean stdin-EOF
+  exit (code 0); `SendInput` after Stop returns `ErrNoInputChannel`.
+- `TestStreamingStdioSession_RequiresWorkdir` — construction guard.
+- `TestJsonRpcStdioSession_HappyPath_CallStop` — `Call` request/response
+  correlation, id allocation increments on the same long-lived child.
+- `TestJsonRpcStdioSession_CallReturnsJsonRpcError` — `*JsonRpcError`
+  extractable via `errors.As`.
+- `TestJsonRpcStdioSession_NotificationHookFanout` — boot-time and
+  per-request notifications forwarded to consumer hook.
+- `TestJsonRpcStdioSession_ContextCancelUnblocksCall` /
+  `..._StopUnblocksPendingCall` — blocked `Call` unblocks promptly on
+  ctx cancel or session Stop; pending map drains cleanly without
+  goroutine leaks.
+- `TestNewFromAdapter_RejectsMultipleLifecycleFlags` — mutual exclusion
+  enforced across all flag pairs and the all-three case.
+- `TestNewFromAdapter_SingleLifecycleFlagAccepted` — each single
+  lifecycle flag routes to its dedicated runtime.
+
+`go test -race -count=1 -timeout 240s ./...` — green.
+
+### Reference
+
+Portfolio rationale for the 4-mode lifecycle axis (oneShot / streamingStdio /
+jsonRpcStdio / httpServer / pty) lives in the agent-workspaces knowledge
+base. The companion `go-providers` v0.17 sprint emits the argv these
+runtimes consume; this library carries the runtime-kind selection and
+per-shape I/O loops.
+
 ## v0.7.2 — 2026-05-10
 
 Public-release prep. No public Go API changes vs v0.7.1.

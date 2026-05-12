@@ -1,13 +1,25 @@
 // Package agentsessions provides a long-lived agent-session abstraction
 // over the hollis-labs Go primitive libraries.
 //
-// A Session is the running handle for one agent: turn-based subprocess
-// (driven by go-runner + a provider.CLIAdapter), long-lived PTY (an
-// llmcontracts.Provider directly), or HTTP-streamed (an
-// llmcontracts.Provider directly). All shapes expose the same Session
-// interface — Wait, Stop,
-// SendInput, Resize, Health, CheckpointHints — so consumers (agent-mux,
-// clockwork, nanite) can drive any of them uniformly.
+// A Session is the running handle for one agent. Five lifecycle shapes
+// are supported, selected by Capabilities flags on the adapter config:
+//
+//   - turn-based subprocess (default — runner.Run per SendInput)
+//   - long-lived PTY (Caps.PTY) — TUI driven over a creack/pty master
+//   - long-lived streaming stdio (Caps.StreamingStdio) — NDJSON over
+//     stdin/stdout (Claude `claude -p --input-format stream-json`)
+//   - long-lived JSON-RPC stdio (Caps.JsonRpcStdio) — JSON-RPC 2.0 over
+//     stdin/stdout (Codex `app-server`)
+//   - HTTP-streamed (llmcontracts.Provider directly, via NewFromProvider)
+//
+// PTY / StreamingStdio / JsonRpcStdio are mutually exclusive — at most
+// one lifecycle flag may be true on a single Capabilities value. All
+// shapes expose the same Session interface — Wait, Stop, SendInput,
+// Resize, Health, CheckpointHints — so consumers (agent-mux, clockwork,
+// nanite) can drive any of them uniformly. The JsonRpc runtime
+// additionally implements JsonRpcCaller (Call(method, params) → result)
+// for typed request/response correlation; SendInput remains the
+// raw-bytes escape hatch.
 //
 // A Manager registers Sessions, persists state transitions through
 // caller-supplied sinks, watches for terminal exits, and broadcasts

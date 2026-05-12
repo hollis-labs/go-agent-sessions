@@ -77,13 +77,22 @@ func NewFromAdapter(cfg AdapterRuntimeConfig) (Runtime, error) {
 	if cfg.Adapter == nil {
 		return nil, errors.New("agentsessions: AdapterRuntimeConfig.Adapter is required")
 	}
+	if err := cfg.Caps.validateLifecycle(); err != nil {
+		return nil, err
+	}
 	if cfg.Kind == "" {
 		cfg.Kind = "cli"
 	}
-	if cfg.Caps.PTY {
+	switch {
+	case cfg.Caps.PTY:
 		return &ptyRuntime{cfg: cfg}, nil
+	case cfg.Caps.StreamingStdio:
+		return &streamingStdioRuntime{cfg: cfg}, nil
+	case cfg.Caps.JsonRpcStdio:
+		return &jsonRpcStdioRuntime{cfg: cfg}, nil
+	default:
+		return &adapterRuntime{cfg: cfg}, nil
 	}
-	return &adapterRuntime{cfg: cfg}, nil
 }
 
 // adapterRuntime wraps a CLIAdapter as a Runtime.
