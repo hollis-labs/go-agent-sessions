@@ -376,6 +376,82 @@ func TestPTYRuntime_AutoFireFirstTurn_StdinBootMode_NoOp(t *testing.T) {
 	}
 }
 
+func TestPTYRuntime_StdinBootPromptLarge_StartReturns(t *testing.T) {
+	tests := []struct {
+		name       string
+		supervisor *SupervisorOptions
+	}{
+		{name: "legacy"},
+		{
+			name: "supervised",
+			supervisor: &SupervisorOptions{
+				IdleKill: 5 * time.Second,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			script := writePTYEchoScript(t, dir)
+
+			rt, _ := NewFromAdapter(AdapterRuntimeConfig{
+				ID:      "pty-large-stdin-boot-" + tt.name,
+				Kind:    "cli",
+				Adapter: &ptyEchoAdapter{scriptPath: script},
+				Caps:    Capabilities{PTY: true, BinaryRequired: true},
+			})
+
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+
+			logPath := filepath.Join(dir, "session.log")
+			bootPrompt := strings.Repeat("boot-prompt-line\n", 20000)
+			started := make(chan struct{})
+			var sess Session
+			var startErr error
+			go func() {
+				defer close(started)
+				sess, startErr = rt.Start(ctx, StartOptions{
+					Workdir:    dir,
+					LogPath:    logPath,
+					BootMode:   "stdin",
+					BootPrompt: bootPrompt,
+					Supervisor: tt.supervisor,
+				})
+			}()
+
+			select {
+			case <-started:
+			case <-ctx.Done():
+				t.Fatal("Start blocked on large BootMode=stdin prompt")
+			}
+			if startErr != nil {
+				t.Fatalf("Start: %v", startErr)
+			}
+			defer func() { _ = sess.Stop(context.Background()) }()
+
+			pidr, ok := sess.(PIDReporter)
+			if !ok {
+				t.Fatal("pty session does not implement PIDReporter")
+			}
+			if pidr.LivePID() == 0 {
+				t.Fatal("session did not reach running state")
+			}
+
+			deadline := time.Now().Add(2 * time.Second)
+			for time.Now().Before(deadline) {
+				if data, err := os.ReadFile(logPath); err == nil && strings.Contains(string(data), "delta:boot-prompt-line") {
+					return
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
+			data, _ := os.ReadFile(logPath)
+			t.Fatalf("large stdin boot prompt did not reach PTY child (log prefix: %q)", string(data[:min(len(data), 256)]))
+		})
+	}
+}
+
 func TestPTYRuntime_WorkspaceDir_FallbackLogPath(t *testing.T) {
 	// LogPath empty, WorkspaceDir set: log lands at <WorkspaceDir>/logs/session.log.
 	dir := t.TempDir()

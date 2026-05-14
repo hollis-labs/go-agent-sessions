@@ -99,8 +99,8 @@ func (r *ptyRuntime) Start(ctx context.Context, opts StartOptions) (Session, err
 	// harness CapsProviderSessionID/PresetCarriedBeforeTurn pins this.
 	s.lastSessionID.Store(opts.SessionIDPreset)
 
-	// First spawn happens synchronously so that BootMode=stdin writes and
-	// AutoFireFirstTurn delivery resolve before Start returns.
+	// First spawn happens synchronously so AutoFireFirstTurn delivery can
+	// resolve before Start returns.
 	cmd, ptmx, attemptCleanup, err := s.spawnAttempt(0)
 	if err != nil {
 		_ = logF.Close()
@@ -108,13 +108,21 @@ func (r *ptyRuntime) Start(ctx context.Context, opts StartOptions) (Session, err
 		return nil, err
 	}
 
+	readerReady := make(chan struct{})
+	var supervisorStart chan struct{}
+	var supervisorStartOnce sync.Once
+	signalSupervisorStart := func() {
+		if supervisorStart != nil {
+			supervisorStartOnce.Do(func() { close(supervisorStart) })
+		}
+	}
 	if opts.Supervisor == nil {
 		// v0.5.0 single-shot lifecycle — preserved exactly. The legacy
 		// spawnReader / spawnWaiter pair captures the local ptmx and
 		// nil-clears the struct field at exit; no restart, no idle-kill,
 		// no watchdog.
 		s.legacyCleanup = attemptCleanup
-		s.spawnReaderLegacy(ptmx)
+		s.spawnReaderLegacy(ptmx, readerReady)
 		s.spawnWaiterLegacy(ptmx, cmd)
 	} else {
 		// Supervised lifecycle: a per-attempt reader + waiter + supervisor
@@ -122,12 +130,29 @@ func (r *ptyRuntime) Start(ctx context.Context, opts StartOptions) (Session, err
 		// spawned above; runSupervised assumes ownership of the lifecycle
 		// from here. logFile + sandbox/limit cleanups for the first
 		// attempt are owned by runSupervised.
-		go s.runSupervised(ctx, cmd, ptmx, attemptCleanup)
+		supervisorStart = make(chan struct{})
+		go s.runSupervised(ctx, cmd, ptmx, attemptCleanup, readerReady, supervisorStart)
 	}
 
+	if opts.BootMode == "stdin" && opts.BootPrompt != "" {
+		select {
+		case <-readerReady:
+		case <-ctx.Done():
+			signalSupervisorStart()
+			_ = s.Stop(context.Background())
+			return nil, ctx.Err()
+		}
+		if err := s.writeRawInputString(opts.BootPrompt); err != nil {
+			signalSupervisorStart()
+			_ = s.Stop(context.Background())
+			return nil, fmt.Errorf("agentsessions: write boot prompt: %w", err)
+		}
+	}
+	signalSupervisorStart()
+
 	if opts.AutoFireFirstTurn && len(opts.FirstTurnPayload) > 0 {
-		// Skip when the boot-prompt-on-stdin convention already wrote a
-		// kickoff into the PTY during spawnAttempt(0).
+		// Skip when the boot-prompt-on-stdin convention already delivered
+		// a kickoff into the PTY earlier in Start.
 		if !(opts.BootMode == "stdin" && opts.BootPrompt != "") {
 			if err := s.SendInput(ctx, opts.FirstTurnPayload); err != nil {
 				_ = s.Stop(ctx)
@@ -228,7 +253,7 @@ type ptySession struct {
 
 // spawnAttempt creates a fresh PTY child for attempt N (0-indexed). On
 // success, sets s.cmd / s.ptmx (under ptmxLock), updates startedPID /
-// lastPID, and writes the boot prompt on attempt 0 when BootMode=stdin.
+// lastPID.
 // Returns the cmd + ptmx locals (so callers can capture them) and a
 // cleanup func to invoke after cmd.Wait completes.
 func (s *ptySession) spawnAttempt(attempt int) (*exec.Cmd, *os.File, func(), error) {
@@ -313,23 +338,6 @@ func (s *ptySession) spawnAttempt(attempt int) (*exec.Cmd, *os.File, func(), err
 	}
 	s.spawnedAt.Store(time.Now().UnixNano())
 
-	if attempt == 0 && s.opts.BootMode == "stdin" && s.opts.BootPrompt != "" {
-		if _, werr := io.WriteString(ptmx, s.opts.BootPrompt); werr != nil {
-			// Reap the child to avoid a zombie — pty.Start succeeded so
-			// cmd owns a live process.
-			_ = cmd.Process.Kill()
-			_ = cmd.Wait()
-			_ = ptmx.Close()
-			limitCleanup()
-			if sandboxCleanup != nil {
-				sandboxCleanup()
-			}
-			return nil, nil, nil, fmt.Errorf("agentsessions: write boot prompt: %w", werr)
-		}
-		// Boot-prompt write counts as activity for idle-kill bookkeeping.
-		s.tickActivity()
-	}
-
 	cleanup := func() {
 		limitCleanup()
 		if sandboxCleanup != nil {
@@ -342,9 +350,10 @@ func (s *ptySession) spawnAttempt(attempt int) (*exec.Cmd, *os.File, func(), err
 // spawnReaderLegacy is the v0.5.0 reader: scans line-delimited output, tees
 // to logFile + Fanout, fans events out, ticks activity. Used only on the
 // non-supervised lifecycle. Closes copyDone on EOF.
-func (s *ptySession) spawnReaderLegacy(ptmx *os.File) {
+func (s *ptySession) spawnReaderLegacy(ptmx *os.File, ready chan<- struct{}) {
 	go func() {
 		defer close(s.copyDone)
+		close(ready)
 		s.runReaderLoop(ptmx)
 	}()
 }
@@ -471,7 +480,7 @@ func (s *ptySession) spawnWaiterLegacy(ptmx *os.File, cmd *exec.Cmd) {
 //  6. If crash and attempts remain → backoff, OnRestart, spawn next
 //     attempt.
 //  7. Otherwise (exhausted) → finalize with restart_exhausted.
-func (s *ptySession) runSupervised(ctx context.Context, firstCmd *exec.Cmd, firstPtmx *os.File, firstCleanup func()) {
+func (s *ptySession) runSupervised(ctx context.Context, firstCmd *exec.Cmd, firstPtmx *os.File, firstCleanup func(), firstReaderReady chan<- struct{}, firstSupervisorStart <-chan struct{}) {
 	sup := s.opts.Supervisor
 	// Clamp RestartOnCrash to a non-negative value. A negative value
 	// would skip the loop body entirely on the first iteration, leaving
@@ -512,7 +521,13 @@ func (s *ptySession) runSupervised(ctx context.Context, firstCmd *exec.Cmd, firs
 	}()
 
 	for attempt := 0; attempt <= maxRestarts; attempt++ {
-		exit := s.waitOnceSupervised(ctx, cmd, ptmx, attempt)
+		var ready chan<- struct{}
+		var supervisorStart <-chan struct{}
+		if attempt == 0 {
+			ready = firstReaderReady
+			supervisorStart = firstSupervisorStart
+		}
+		exit := s.waitOnceSupervised(ctx, cmd, ptmx, attempt, ready, supervisorStart)
 		cleanup()
 		lastExit = exit
 
@@ -564,21 +579,34 @@ func (s *ptySession) runSupervised(ctx context.Context, firstCmd *exec.Cmd, firs
 // supervisor goroutines, watch for caller Stop, await cmd.Wait, tear
 // everything down, classify the exit. Returns the per-attempt *ExitError
 // (nil only on a clean exit).
-func (s *ptySession) waitOnceSupervised(ctx context.Context, cmd *exec.Cmd, ptmx *os.File, attempt int) *ExitError {
+func (s *ptySession) waitOnceSupervised(ctx context.Context, cmd *exec.Cmd, ptmx *os.File, attempt int, readerReady chan<- struct{}, supervisorStart <-chan struct{}) *ExitError {
 	procDone := make(chan struct{})
 	readerDone := make(chan struct{})
 	cause := &supState{}
 	startedAt := time.Now()
-	// Reset activity to attempt-start so idle-kill measures from now, not
-	// from the prior attempt's last tick.
-	s.activity.tick()
 
 	// Reader: drains ptmx until EOF (which fires when ptmx is Close'd
 	// after cmd.Wait returns).
 	go func() {
 		defer close(readerDone)
+		if readerReady != nil {
+			close(readerReady)
+		}
 		s.runReaderLoop(ptmx)
 	}()
+
+	if supervisorStart != nil {
+		select {
+		case <-supervisorStart:
+		case <-ctx.Done():
+		case <-s.stopRequested:
+		}
+	}
+
+	startedAt = time.Now()
+	// Reset activity to attempt-start so idle-kill measures from now, not
+	// from the prior attempt's last tick or initial boot-prompt delivery.
+	s.activity.tick()
 
 	sup := s.opts.Supervisor
 	var supWG sync.WaitGroup
@@ -654,8 +682,8 @@ func (s *ptySession) isStopRequested() bool {
 // the idle-kill / watchdog goroutines) and fires the consumer's
 // Supervisor.ActivityCallback when set, so consumers can observe per-tick
 // activity for telemetry / heartbeat purposes. Called from the reader
-// goroutine on each line and from SendInput after a successful write; the
-// boot-prompt write in spawnAttempt also ticks here.
+// goroutine on each line, from SendInput after a successful write, and from
+// raw stdin boot-prompt delivery after a successful write.
 func (s *ptySession) tickActivity() {
 	s.activity.tick()
 	if sup := s.opts.Supervisor; sup != nil && sup.ActivityCallback != nil {
@@ -801,6 +829,22 @@ func (s *ptySession) SendInput(_ context.Context, data []byte) error {
 		payload = append(append([]byte(nil), data...), '\n')
 	}
 	if _, err := s.ptmx.Write(payload); err != nil {
+		return err
+	}
+	s.tickActivity()
+	return nil
+}
+
+func (s *ptySession) writeRawInputString(data string) error {
+	if !s.alive.Load() {
+		return ErrNoInputChannel
+	}
+	s.ptmxLock.Lock()
+	defer s.ptmxLock.Unlock()
+	if s.ptmx == nil {
+		return ErrNoInputChannel
+	}
+	if _, err := io.WriteString(s.ptmx, data); err != nil {
 		return err
 	}
 	s.tickActivity()
