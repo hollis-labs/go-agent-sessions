@@ -145,11 +145,21 @@ responses are returned as `*JsonRpcError` (extract via `errors.As`).
 `ctx.Done()` unblocks `Call` promptly; the in-flight pending entry is
 removed and any late response from the child is dropped.
 
-Notifications (frames with no `id`) flow through `StartOptions.JsonRpcNotificationHook`
-when set. The runtime does no adapter-specific translation — consumers
-that want typed events either implement `provider.EventParser` on the
-adapter (the runtime calls `ParseLineEvents` per-line, same path as
-StreamingStdio) or do their own decode inside the hook.
+Notifications (frames with a `method` and no `id`) flow through
+`StartOptions.JsonRpcNotificationHook` when set. The runtime does no
+adapter-specific translation — consumers that want typed events either
+implement `provider.EventParser` on the adapter (the runtime calls
+`ParseLineEvents` per-line, same path as StreamingStdio) or do their own
+decode inside the hook.
+
+Server-initiated **requests** (frames with both a `method` and an `id` —
+e.g. codex `app-server` tool-approval elicitations) flow through
+`StartOptions.JsonRpcRequestHook`. The hook's `(result, *JsonRpcError)`
+return is marshaled into the JSON-RPC response sent back to the child.
+JSON-RPC 2.0 requires a response for every request carrying an id; when
+the hook is nil the runtime still answers — with a method-not-handled
+error — so the child fails fast instead of blocking forever. (Frame
+classification keys on `method` first: a Response never carries one.)
 
 `SendInput` remains as a raw-bytes escape hatch for callers that need to
 inject pre-framed bytes outside the `Call` path.

@@ -460,6 +460,30 @@ type StartOptions struct {
 	// Added in v0.8.0.
 	JsonRpcNotificationHook func(method string, params json.RawMessage)
 
+	// JsonRpcRequestHook, when non-nil, is invoked from the
+	// jsonRpcStdioSession reader goroutine for every server-INITIATED
+	// JSON-RPC request received from the child — a frame carrying BOTH a
+	// `method` and an `id` (as opposed to a notification, which has no
+	// `id`, or a response, which has no `method`). The canonical example
+	// is codex app-server's tool-approval / elicitation requests.
+	//
+	// The hook's return value is marshaled into the JSON-RPC response the
+	// runtime sends back to the child: a non-nil *JsonRpcError becomes an
+	// `error` response; otherwise `result` (which may be nil → JSON
+	// `null`) becomes a `result` response.
+	//
+	// JSON-RPC 2.0 requires a response for every request that carries an
+	// id — without one the child blocks forever. When this hook is nil the
+	// runtime still answers, with a method-not-handled error, so the child
+	// fails fast instead of deadlocking. Set this hook to participate in
+	// the child's request/response protocol (approvals, elicitations, …).
+	//
+	// Sends are synchronous; treat the hook like an io.Writer's Write —
+	// keep the work short or hand off to your own goroutine.
+	//
+	// Added in v0.9.5.
+	JsonRpcRequestHook func(method string, params json.RawMessage) (result any, rpcErr *JsonRpcError)
+
 	// AutoPlantBootDir, when true AND the adapter implements
 	// provider.BootDirProvider, instructs the runtime to materialize the
 	// adapter's BootDirSpec into a per-session tempdir on Start and remove

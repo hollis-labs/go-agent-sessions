@@ -387,14 +387,26 @@ func (s *jsonRpcStdioSession) runReaderLoop(stdout io.Reader) {
 			}
 		}
 
-		if frame.ID != nil {
-			// Response — route to the pending Call.
+		// Classify the frame. Per JSON-RPC 2.0 a Response never carries a
+		// `method`; a Request and a Notification always do, and a Request
+		// additionally carries an `id`. The discriminator MUST key on
+		// `method` first: an earlier version keyed purely on `id != nil`,
+		// so a server-initiated request (method + id) was misrouted to
+		// deliverResponse, found no pending Call, and was dropped — the
+		// child then blocked forever waiting for a response it never got
+		// (the codex app-server approval-elicitation deadlock).
+		switch {
+		case frame.Method != "" && frame.ID != nil:
+			// Server-initiated request — JSON-RPC 2.0 requires a response.
+			s.respondToServerRequest(frame)
+		case frame.Method != "":
+			// Notification — no response expected.
+			if s.opts.JsonRpcNotificationHook != nil {
+				s.opts.JsonRpcNotificationHook(frame.Method, frame.Params)
+			}
+		case frame.ID != nil:
+			// Response to one of our outbound Calls.
 			s.deliverResponse(*frame.ID, frame.Result, frame.Error)
-			continue
-		}
-		// Notification — dispatch to consumer hook if set.
-		if frame.Method != "" && s.opts.JsonRpcNotificationHook != nil {
-			s.opts.JsonRpcNotificationHook(frame.Method, frame.Params)
 		}
 	}
 
@@ -424,6 +436,46 @@ func (s *jsonRpcStdioSession) deliverResponse(idRaw json.RawMessage, result json
 	}
 	ch <- jsonRpcResponse{result: result, err: errEnv}
 	close(ch)
+}
+
+// respondToServerRequest answers a server-initiated JSON-RPC request from the
+// child (a frame carrying both `method` and `id`). JSON-RPC 2.0 requires a
+// response for every request that carries an id; without one the child blocks
+// forever — this is the codex app-server tool-approval deadlock.
+//
+// When StartOptions.JsonRpcRequestHook is set the consumer's (result, error)
+// is marshaled into the response. When it is nil the runtime still answers,
+// with a method-not-handled error, so the child fails fast instead of hanging.
+// The request id is echoed back verbatim (it may be a string or a number).
+func (s *jsonRpcStdioSession) respondToServerRequest(frame jsonRpcFrame) {
+	resp := map[string]any{"jsonrpc": "2.0", "id": frame.ID}
+	if hook := s.opts.JsonRpcRequestHook; hook != nil {
+		result, rpcErr := hook(frame.Method, frame.Params)
+		if rpcErr != nil {
+			resp["error"] = rpcErr
+		} else {
+			// result may be nil — that marshals to JSON `null`, a valid
+			// JSON-RPC result.
+			resp["result"] = result
+		}
+	} else {
+		resp["error"] = &JsonRpcError{
+			Code:    -32601,
+			Message: "agentsessions: no JsonRpcRequestHook configured for server-initiated request " + frame.Method,
+		}
+	}
+
+	encoded, err := json.Marshal(resp)
+	if err != nil {
+		return
+	}
+	s.ioLock.Lock()
+	stdin := s.stdin
+	if stdin != nil {
+		_, _ = stdin.Write(append(encoded, '\n'))
+	}
+	s.ioLock.Unlock()
+	s.tickActivity()
 }
 
 // failPendingOnClose drains the pending map at reader-exit time, signalling

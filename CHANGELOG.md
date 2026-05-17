@@ -2,6 +2,36 @@
 
 All notable changes to `go-agent-sessions` are documented in this file. Per-release notes are also published as GitHub Releases.
 
+## v0.9.5 — 2026-05-17
+
+Fixes a `jsonrpc-stdio` frame-routing bug that deadlocked any child which
+sends a server-initiated request — most importantly codex `app-server`
+tool-approval elicitations.
+
+### Fixed
+
+- **`jsonrpc-stdio`: server-initiated requests are no longer dropped.** The
+  reader classified inbound frames purely on `id != nil` → a server-initiated
+  request (a frame with BOTH a `method` and an `id`) was misrouted to the
+  pending-`Call` response path, found no match, and was silently dropped. The
+  child then blocked forever waiting for a response that never came — the
+  codex `app-server` tool-approval deadlock (a codex run that needs any tool
+  hangs indefinitely). Frame classification now keys on `method` first, per
+  JSON-RPC 2.0: a Response never carries a `method`.
+- **PTY: stdin boot-prompt startup deadlock** (#6, first released here). The
+  PTY session could deadlock at startup while writing the boot prompt to the
+  child's stdin before the reader goroutine was draining stdout.
+
+### Added
+
+- **`StartOptions.JsonRpcRequestHook`** — invoked for every server-initiated
+  JSON-RPC request from the child. Its `(result any, *JsonRpcError)` return is
+  marshaled into the response sent back to the child. When the hook is nil the
+  runtime still answers — with a `-32601` method-not-handled error — so the
+  child fails fast instead of deadlocking. This is the general mechanism for
+  participating in a child's request/response protocol (approvals,
+  elicitations); it is not codex-specific.
+
 ## v0.9.4 — 2026-05-12
 
 Adds `StartOptions.PlantContext` so `AutoPlantBootDir` consumers can pass

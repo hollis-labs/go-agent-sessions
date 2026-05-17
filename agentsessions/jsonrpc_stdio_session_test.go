@@ -347,3 +347,190 @@ func TestJsonRpcStdioSession_StopUnblocksPendingCall(t *testing.T) {
 		t.Fatal("pending Call did not unblock after Stop")
 	}
 }
+
+// writeJsonRpcServerRequestScript drops a shell script that:
+//
+//  1. Emits ONE server-initiated request at boot — a frame with both a
+//     `method` ("tool/approval") and an `id` ("srv-1"). This is the shape
+//     codex app-server uses for tool-approval elicitations.
+//  2. Echoes whatever response the runtime writes back (matched by the
+//     "srv-1" id) as a `server.got_response` notification, so the test can
+//     assert the runtime actually answered the request rather than dropping
+//     it (the pre-fix deadlock).
+func writeJsonRpcServerRequestScript(t *testing.T, dir string) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("test script needs sh; not running on Windows")
+	}
+	path := filepath.Join(dir, "fake-jsonrpc-server-request.sh")
+	body := `#!/bin/sh
+printf '%s\n' '{"jsonrpc":"2.0","id":"srv-1","method":"tool/approval","params":{"tool":"write_file"}}'
+while IFS= read -r line; do
+    case "$line" in
+    *'"id":"srv-1"'*)
+        printf '{"jsonrpc":"2.0","method":"server.got_response","params":%s}\n' "$line"
+        ;;
+    esac
+done
+exit 0
+`
+	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+	return path
+}
+
+// awaitNotification waits up to 2s for a notification whose method equals want
+// and returns its raw params. Fails the test on timeout.
+func awaitNotification(t *testing.T, recv func() (string, json.RawMessage, bool), want string) json.RawMessage {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if method, params, ok := recv(); ok && method == want {
+			return params
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("notification %q not received within deadline", want)
+	return nil
+}
+
+// TestJsonRpcStdioSession_ServerRequestHook pins that a server-initiated
+// request (method + id) is routed to JsonRpcRequestHook and the hook's result
+// is sent back to the child as a JSON-RPC response. Pre-fix, the frame was
+// misrouted to deliverResponse and dropped, leaving the child blocked.
+func TestJsonRpcStdioSession_ServerRequestHook(t *testing.T) {
+	dir := t.TempDir()
+	script := writeJsonRpcServerRequestScript(t, dir)
+
+	rt, err := NewFromAdapter(AdapterRuntimeConfig{
+		ID:      "jsonrpc-server-request",
+		Kind:    "cli",
+		Adapter: &minimalAdapter{binary: script},
+		Caps:    Capabilities{JsonRpcStdio: true, BinaryRequired: true},
+	})
+	if err != nil {
+		t.Fatalf("NewFromAdapter: %v", err)
+	}
+
+	var (
+		mu         sync.Mutex
+		hookMethod string
+		hookParams string
+		notifs     = map[string]json.RawMessage{}
+	)
+	requestHook := func(method string, params json.RawMessage) (any, *JsonRpcError) {
+		mu.Lock()
+		hookMethod = method
+		hookParams = string(params)
+		mu.Unlock()
+		return map[string]any{"decision": "approved"}, nil
+	}
+	notifHook := func(method string, params json.RawMessage) {
+		mu.Lock()
+		notifs[method] = append(json.RawMessage(nil), params...)
+		mu.Unlock()
+	}
+
+	sess, err := rt.Start(context.Background(), StartOptions{
+		Workdir:                 dir,
+		LogPath:                 filepath.Join(dir, "session.log"),
+		JsonRpcRequestHook:      requestHook,
+		JsonRpcNotificationHook: notifHook,
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = sess.Stop(context.Background()) }()
+
+	recv := func() (string, json.RawMessage, bool) {
+		mu.Lock()
+		defer mu.Unlock()
+		for m, p := range notifs {
+			if m == "server.got_response" {
+				return m, p, true
+			}
+		}
+		return "", nil, false
+	}
+	params := awaitNotification(t, recv, "server.got_response")
+
+	mu.Lock()
+	gotMethod, gotParams := hookMethod, hookParams
+	mu.Unlock()
+	if gotMethod != "tool/approval" {
+		t.Errorf("hook method = %q, want tool/approval", gotMethod)
+	}
+	if !strings.Contains(gotParams, "write_file") {
+		t.Errorf("hook params = %q, want it to contain write_file", gotParams)
+	}
+
+	// The echoed response frame must carry our hook result and the verbatim
+	// string id.
+	resp := string(params)
+	if !strings.Contains(resp, `"approved"`) {
+		t.Errorf("response echoed by child = %q, want it to contain the hook result \"approved\"", resp)
+	}
+	if !strings.Contains(resp, `"srv-1"`) {
+		t.Errorf("response echoed by child = %q, want it to echo id srv-1", resp)
+	}
+}
+
+// TestJsonRpcStdioSession_ServerRequestNoHook pins that, with no
+// JsonRpcRequestHook configured, a server-initiated request is still answered
+// — with a method-not-handled error — so the child fails fast instead of
+// deadlocking.
+func TestJsonRpcStdioSession_ServerRequestNoHook(t *testing.T) {
+	dir := t.TempDir()
+	script := writeJsonRpcServerRequestScript(t, dir)
+
+	rt, err := NewFromAdapter(AdapterRuntimeConfig{
+		ID:      "jsonrpc-server-request-nohook",
+		Kind:    "cli",
+		Adapter: &minimalAdapter{binary: script},
+		Caps:    Capabilities{JsonRpcStdio: true, BinaryRequired: true},
+	})
+	if err != nil {
+		t.Fatalf("NewFromAdapter: %v", err)
+	}
+
+	var (
+		mu     sync.Mutex
+		notifs = map[string]json.RawMessage{}
+	)
+	notifHook := func(method string, params json.RawMessage) {
+		mu.Lock()
+		notifs[method] = append(json.RawMessage(nil), params...)
+		mu.Unlock()
+	}
+
+	sess, err := rt.Start(context.Background(), StartOptions{
+		Workdir:                 dir,
+		LogPath:                 filepath.Join(dir, "session.log"),
+		JsonRpcNotificationHook: notifHook,
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = sess.Stop(context.Background()) }()
+
+	recv := func() (string, json.RawMessage, bool) {
+		mu.Lock()
+		defer mu.Unlock()
+		for m, p := range notifs {
+			if m == "server.got_response" {
+				return m, p, true
+			}
+		}
+		return "", nil, false
+	}
+	params := awaitNotification(t, recv, "server.got_response")
+
+	resp := string(params)
+	if !strings.Contains(resp, "-32601") {
+		t.Errorf("no-hook response = %q, want a -32601 method-not-handled error", resp)
+	}
+	if !strings.Contains(resp, `"error"`) {
+		t.Errorf("no-hook response = %q, want an error envelope", resp)
+	}
+}
