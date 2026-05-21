@@ -10,10 +10,12 @@
 //     stdin/stdout (Claude `claude -p --input-format stream-json`)
 //   - long-lived JSON-RPC stdio (Caps.JsonRpcStdio) — JSON-RPC 2.0 over
 //     stdin/stdout (Codex `app-server`)
+//   - long-lived HTTP server (Caps.ServeHTTP) — child-owned HTTP API
+//     with server-sent events (opencode `serve`)
 //   - HTTP-streamed (llmcontracts.Provider directly, via NewFromProvider)
 //
-// PTY / StreamingStdio / JsonRpcStdio are mutually exclusive — at most
-// one lifecycle flag may be true on a single Capabilities value. All
+// PTY / StreamingStdio / JsonRpcStdio / ServeHTTP are mutually exclusive
+// — at most one lifecycle flag may be true on a single Capabilities value. All
 // shapes expose the same Session interface — Wait, Stop, SendInput,
 // Resize, Health, CheckpointHints — so consumers (agent-mux, clockwork,
 // nanite) can drive any of them uniformly. The JsonRpc runtime

@@ -44,7 +44,7 @@ type AdapterRuntimeConfig struct {
 }
 
 // NewFromAdapter constructs a Runtime backed by cfg.Adapter. Runtime
-// shape is selected by cfg.Caps.PTY:
+// shape is selected by the lifecycle flag in cfg.Caps:
 //
 //   - cfg.Caps.PTY == false (default): subprocess-per-turn runtime.
 //     Each SendInput drives a fresh runner.Run that invokes the underlying
@@ -90,6 +90,8 @@ func NewFromAdapter(cfg AdapterRuntimeConfig) (Runtime, error) {
 		return &streamingStdioRuntime{cfg: cfg}, nil
 	case cfg.Caps.JsonRpcStdio:
 		return &jsonRpcStdioRuntime{cfg: cfg}, nil
+	case cfg.Caps.ServeHTTP:
+		return &serveHTTPRuntime{cfg: cfg}, nil
 	default:
 		return &adapterRuntime{cfg: cfg}, nil
 	}
