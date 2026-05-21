@@ -59,10 +59,10 @@ func (s LiveState) String() string {
 // returns the static capability declaration; the value is immutable for
 // the Runtime's lifetime and safe to call concurrently.
 //
-// Lifecycle flags (PTY / StreamingStdio / JsonRpcStdio) are mutually
+// Lifecycle flags (PTY / StreamingStdio / JsonRpcStdio / ServeHTTP) are mutually
 // exclusive — at most one may be true for a given Capabilities value.
 // NewFromAdapter validates this at construction time. When none of the
-// three are set, the adapter runtime (subprocess-per-turn) is selected.
+// lifecycle flags are set, the adapter runtime (subprocess-per-turn) is selected.
 type Capabilities struct {
 	// PTY: Session.SendInput writes to a live PTY master. Resize is
 	// meaningful. False for turn-based subprocess adapters. Selects the
@@ -85,6 +85,12 @@ type Capabilities struct {
 	// Mutually exclusive with PTY and StreamingStdio.
 	JsonRpcStdio bool
 
+	// ServeHTTP: long-lived child exposing an HTTP API. The runtime
+	// spawns the adapter command, discovers the printed listen URL,
+	// subscribes to server-sent events, and sends turns through HTTP.
+	// Mutually exclusive with PTY, StreamingStdio, and JsonRpcStdio.
+	ServeHTTP bool
+
 	// Resize: Session.Resize has an observable effect. Requires PTY=true
 	// to be meaningful; non-PTY adapters no-op Resize.
 	Resize bool
@@ -104,7 +110,7 @@ type Capabilities struct {
 }
 
 // validateLifecycle returns an error when more than one of the lifecycle
-// flags (PTY, StreamingStdio, JsonRpcStdio) is set. Called by
+// flags (PTY, StreamingStdio, JsonRpcStdio, ServeHTTP) is set. Called by
 // NewFromAdapter to reject ambiguous runtime selection at construction
 // time rather than silently preferring one flag.
 func (c Capabilities) validateLifecycle() error {
@@ -118,8 +124,11 @@ func (c Capabilities) validateLifecycle() error {
 	if c.JsonRpcStdio {
 		n++
 	}
+	if c.ServeHTTP {
+		n++
+	}
 	if n > 1 {
-		return errors.New("agentsessions: Capabilities declares more than one lifecycle flag (PTY / StreamingStdio / JsonRpcStdio); at most one may be true")
+		return errors.New("agentsessions: Capabilities declares more than one lifecycle flag (PTY / StreamingStdio / JsonRpcStdio / ServeHTTP); at most one may be true")
 	}
 	return nil
 }
