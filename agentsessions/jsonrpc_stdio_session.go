@@ -229,6 +229,7 @@ func (s *jsonRpcStdioSession) spawnAttempt(attempt int) (*exec.Cmd, io.WriteClos
 	}
 
 	cmd := exec.Command(binary, args...) //nolint:gosec // G204
+	configureCommandProcessGroup(cmd)
 	cmd.Dir = s.opts.Workdir
 	if len(s.opts.Env) > 0 {
 		cmd.Env = s.opts.Env
@@ -305,7 +306,7 @@ func (s *jsonRpcStdioSession) spawnAttempt(attempt int) (*exec.Cmd, io.WriteClos
 
 	if attempt == 0 && s.opts.BootMode == "stdin" && s.opts.BootPrompt != "" {
 		if _, werr := io.WriteString(stdin, s.opts.BootPrompt); werr != nil {
-			_ = cmd.Process.Kill()
+			_ = signalProcessGroup(cmd, syscall.SIGKILL)
 			_ = cmd.Wait()
 			_ = stdin.Close()
 			_ = stdout.Close()
@@ -750,7 +751,7 @@ func (s *jsonRpcStdioSession) superviseWatchdog(cmd *exec.Cmd, cause *supState, 
 				return
 			}
 			if cmd.Process != nil {
-				_ = cmd.Process.Signal(syscall.SIGKILL)
+				_ = signalProcessGroup(cmd, syscall.SIGKILL)
 			}
 			return
 		}
@@ -801,7 +802,7 @@ func (s *jsonRpcStdioSession) Stop(ctx context.Context) error {
 		case <-ctx.Done():
 		}
 
-		if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		if err := signalProcessGroup(cmd, syscall.SIGTERM); err != nil {
 			return
 		}
 		const grace = 5 * time.Second
@@ -811,11 +812,11 @@ func (s *jsonRpcStdioSession) Stop(ctx context.Context) error {
 		case <-s.done:
 		case <-timer.C:
 			if cmd.Process != nil {
-				killErr = cmd.Process.Kill()
+				killErr = signalProcessGroup(cmd, syscall.SIGKILL)
 			}
 		case <-ctx.Done():
 			if cmd.Process != nil {
-				killErr = cmd.Process.Kill()
+				killErr = signalProcessGroup(cmd, syscall.SIGKILL)
 			}
 		}
 	})

@@ -343,13 +343,13 @@ func killWithGrace(cmd *exec.Cmd, grace time.Duration, procDone <-chan struct{})
 	if cmd.Process == nil {
 		return
 	}
-	_ = cmd.Process.Signal(syscall.SIGTERM)
+	_ = signalProcessGroup(cmd, syscall.SIGTERM)
 	select {
 	case <-procDone:
 		return
 	case <-time.After(grace):
 	}
 	if cmd.Process != nil {
-		_ = cmd.Process.Signal(syscall.SIGKILL)
+		_ = signalProcessGroup(cmd, syscall.SIGKILL)
 	}
 }
