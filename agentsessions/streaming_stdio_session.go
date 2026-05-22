@@ -223,6 +223,7 @@ func (s *streamingStdioSession) spawnAttempt(attempt int) (*exec.Cmd, io.WriteCl
 	}
 
 	cmd := exec.Command(binary, args...) //nolint:gosec // G204: adapter-sourced binary + args
+	configureCommandProcessGroup(cmd)
 	cmd.Dir = s.opts.Workdir
 	if len(s.opts.Env) > 0 {
 		cmd.Env = s.opts.Env
@@ -304,7 +305,7 @@ func (s *streamingStdioSession) spawnAttempt(attempt int) (*exec.Cmd, io.WriteCl
 		// Caller frames the boot prompt — we append nothing here. SendInput
 		// is the framing path; the boot-prompt write goes verbatim.
 		if _, werr := io.WriteString(stdin, s.opts.BootPrompt); werr != nil {
-			_ = cmd.Process.Kill()
+			_ = signalProcessGroup(cmd, syscall.SIGKILL)
 			_ = cmd.Wait()
 			_ = stdin.Close()
 			_ = stdout.Close()
@@ -648,7 +649,7 @@ func (s *streamingStdioSession) superviseWatchdog(cmd *exec.Cmd, cause *supState
 				return
 			}
 			if cmd.Process != nil {
-				_ = cmd.Process.Signal(syscall.SIGKILL)
+				_ = signalProcessGroup(cmd, syscall.SIGKILL)
 			}
 			return
 		}
@@ -697,7 +698,7 @@ func (s *streamingStdioSession) Stop(ctx context.Context) error {
 			// caller-cancelled wait — fall through to signal-based escalation
 		}
 
-		if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		if err := signalProcessGroup(cmd, syscall.SIGTERM); err != nil {
 			return
 		}
 		const grace = 5 * time.Second
@@ -707,11 +708,11 @@ func (s *streamingStdioSession) Stop(ctx context.Context) error {
 		case <-s.done:
 		case <-timer.C:
 			if cmd.Process != nil {
-				killErr = cmd.Process.Kill()
+				killErr = signalProcessGroup(cmd, syscall.SIGKILL)
 			}
 		case <-ctx.Done():
 			if cmd.Process != nil {
-				killErr = cmd.Process.Kill()
+				killErr = signalProcessGroup(cmd, syscall.SIGKILL)
 			}
 		}
 	})

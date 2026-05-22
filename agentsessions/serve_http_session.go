@@ -201,6 +201,7 @@ func (s *serveHTTPSession) spawn() error {
 	}
 
 	cmd := exec.Command(binary, args...) //nolint:gosec // G204: adapter-sourced binary + args
+	configureCommandProcessGroup(cmd)
 	cmd.Dir = s.opts.Workdir
 	if len(s.opts.Env) > 0 {
 		cmd.Env = s.opts.Env
@@ -548,15 +549,15 @@ func (s *serveHTTPSession) Stop(ctx context.Context) error {
 		case <-time.After(500 * time.Millisecond):
 		case <-ctx.Done():
 		}
-		if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		if err := signalProcessGroup(cmd, syscall.SIGTERM); err != nil {
 			return
 		}
 		select {
 		case <-s.done:
 		case <-time.After(5 * time.Second):
-			killErr = cmd.Process.Kill()
+			killErr = signalProcessGroup(cmd, syscall.SIGKILL)
 		case <-ctx.Done():
-			killErr = cmd.Process.Kill()
+			killErr = signalProcessGroup(cmd, syscall.SIGKILL)
 		}
 	})
 	return killErr

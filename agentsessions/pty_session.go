@@ -289,6 +289,7 @@ func (s *ptySession) spawnAttempt(attempt int) (*exec.Cmd, *os.File, func(), err
 	}
 
 	cmd := exec.Command(binary, args...) //nolint:gosec // G204: adapter-sourced binary + args
+	configurePTYCommandProcessGroup(cmd)
 	cmd.Dir = s.opts.Workdir
 	if len(s.opts.Env) > 0 {
 		cmd.Env = s.opts.Env
@@ -750,7 +751,7 @@ func (s *ptySession) superviseWatchdog(cmd *exec.Cmd, cause *supState, procDone 
 				return
 			}
 			if cmd.Process != nil {
-				_ = cmd.Process.Signal(syscall.SIGKILL)
+				_ = signalProcessGroup(cmd, syscall.SIGKILL)
 			}
 			return
 		}
@@ -790,7 +791,7 @@ func (s *ptySession) Stop(ctx context.Context) error {
 		// SIGTERM as a belt-and-suspenders to cover the legacy path
 		// (which has no stop-watcher) and the supervised between-attempts
 		// race window.
-		if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		if err := signalProcessGroup(cmd, syscall.SIGTERM); err != nil {
 			return
 		}
 		const grace = 5 * time.Second
@@ -802,11 +803,11 @@ func (s *ptySession) Stop(ctx context.Context) error {
 			// already torn down.
 		case <-timer.C:
 			if cmd.Process != nil {
-				killErr = cmd.Process.Kill()
+				killErr = signalProcessGroup(cmd, syscall.SIGKILL)
 			}
 		case <-ctx.Done():
 			if cmd.Process != nil {
-				killErr = cmd.Process.Kill()
+				killErr = signalProcessGroup(cmd, syscall.SIGKILL)
 			}
 		}
 	})
