@@ -34,8 +34,9 @@ matters, because most of the surface is concurrent.
 ## Boundaries
 
 This module was absorbed into `agentkit` as `agentkit/agentsessions` at agentkit
-v0.1.0 and has not changed since v0.10.0 (2026-05-21). New work belongs in
-`agentkit`.
+v0.1.0, and this repo is maintenance-only. New work belongs in `agentkit`.
+
+`CHANGELOG.md` and the git tags are the authority for what has shipped here.
 
 The attach broker must never block or slow the session it observes. The ring is
 bounded and drops oldest; a subscriber that cannot keep up is dropped, not
